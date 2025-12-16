@@ -165,6 +165,12 @@ preference_prompt_2 = "Given a chronological list of {dataset_full_name} items t
                         "To determine the user's long-term preferences, please analyze the contents of all the items he has bought. Look for common features that appear frequently across the user's shopping records. To determine the user's short-term preferences, focus on the items he has bought most recently. Identify any new or different features that have emerged in the user's shopping records. " \
                         "Here is a chronological list of items that the user has bought: \n{item_titles}. \nPlease provide separate analyses for the user's long-term and short-term preferences. Your answer should be concise and general, without listing specific items. Your answer should be in the third person and in the following format:\n\nLong-term preferences: []\nShort-term preferences: []\n\n"
 
+review_generation_prompt = "A user has purchased a {dataset_full_name} item named \"{item_title}\". " \
+                            "Please generate a realistic user review comment for this item. " \
+                            "The review should express the user's opinion and personal preferences about the item. " \
+                            "Make it sound natural and authentic, similar to real customer reviews. " \
+                            "The review should be concise (1-3 sentences) and focus on the item's characteristics and the user's experience."
+
 
 # remove 'Magazine', 'Gift', 'Music', 'Kindle'
 amazon18_dataset_list = [

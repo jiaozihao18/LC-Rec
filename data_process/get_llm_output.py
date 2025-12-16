@@ -7,9 +7,46 @@ import random
 import time
 from logging import getLogger
 import openai
-from utils import get_res_batch, load_json, intention_prompt, preference_prompt_1, preference_prompt_2, amazon18_dataset2fullname, write_json_file
+from utils import get_res_batch, load_json, intention_prompt, preference_prompt_1, preference_prompt_2, review_generation_prompt, amazon18_dataset2fullname, write_json_file
 import json
 
+
+def generate_missing_reviews(args, missing_reviews_data, item2feature, api_info):
+    """
+    批量生成缺失的 review
+    missing_reviews_data: list of (user, item) tuples
+    """
+    if len(missing_reviews_data) == 0:
+        return {}
+    
+    dataset_full_name = amazon18_dataset2fullname[args.dataset]
+    dataset_full_name = dataset_full_name.replace("_", " ").lower()
+    
+    prompt_list = []
+    for user, item in missing_reviews_data:
+        item_title = item2feature[str(item)]["title"]
+        prompt = review_generation_prompt.format(
+            item_title=item_title,
+            dataset_full_name=dataset_full_name
+        )
+        prompt_list.append(prompt)
+    
+    generated_reviews = {}
+    st = 0
+    while st < len(prompt_list):
+        print(f"Generating missing reviews: {st}/{len(prompt_list)}")
+        res = get_res_batch(args.model_name, prompt_list[st:st+args.batchsize], args.max_tokens, api_info)
+        
+        for i, review_text in enumerate(res):
+            user, item = missing_reviews_data[st + i]
+            if review_text == '':
+                print(f"Generated review is empty for user {user}, item {item}, using default")
+                review_text = "This item meets my expectations and I am satisfied with the purchase."
+            generated_reviews[str((user, item))] = {"review": review_text.strip(), "summary": ""}
+        
+        st += args.batchsize
+    
+    return generated_reviews
 
 
 def get_intention_train(args, inters, item2feature, reviews, api_info):
@@ -26,7 +63,9 @@ def get_intention_train(args, inters, item2feature, reviews, api_info):
     prompt_list = []
 
     inter_data = []
+    missing_reviews = []
 
+    # 先收集所有需要的数据，并检查哪些 review 缺失
     for (user,item_list) in inters.items():
         user = int(user)
         item = int(item_list[-3])
@@ -34,10 +73,31 @@ def get_intention_train(args, inters, item2feature, reviews, api_info):
 
         inter_data.append((user,item,history))
 
-        review = reviews[str((user, item))]["review"]
+        review_key = str((user, item))
+        if review_key not in reviews:
+            missing_reviews.append((user, item))
+            # 先使用空字符串占位，稍后会替换
+            reviews[review_key] = {"review": "", "summary": ""}
+        
+        review = reviews[review_key]["review"]
         item_title = item2feature[str(item)]["title"]
         input_prompt = prompt.format(item_title=item_title,dataset_full_name=dataset_full_name,review=review)
         prompt_list.append(input_prompt)
+    
+    # 如果有缺失的 review，批量生成
+    if missing_reviews:
+        print(f"Found {len(missing_reviews)} missing reviews, generating them...")
+        generated_reviews = generate_missing_reviews(args, missing_reviews, item2feature, api_info)
+        # 更新 reviews 字典
+        reviews.update(generated_reviews)
+        # 重新构建 prompt_list，使用生成的 review
+        prompt_list = []
+        for i, (user, item, history) in enumerate(inter_data):
+            review_key = str((user, item))
+            review = reviews[review_key]["review"]
+            item_title = item2feature[str(item)]["title"]
+            input_prompt = prompt.format(item_title=item_title,dataset_full_name=dataset_full_name,review=review)
+            prompt_list.append(input_prompt)
 
     st = 0
     with open(intention_train_output_file, mode='a') as f:
@@ -119,7 +179,9 @@ def get_intention_test(args, inters, item2feature, reviews, api_info):
     prompt_list = []
 
     inter_data = []
+    missing_reviews = []
 
+    # 先收集所有需要的数据，并检查哪些 review 缺失
     for (user,item_list) in inters.items():
         user = int(user)
         item = int(item_list[-1])
@@ -127,10 +189,31 @@ def get_intention_test(args, inters, item2feature, reviews, api_info):
 
         inter_data.append((user,item,history))
 
-        review = reviews[str((user, item))]["review"]
+        review_key = str((user, item))
+        if review_key not in reviews:
+            missing_reviews.append((user, item))
+            # 先使用空字符串占位，稍后会替换
+            reviews[review_key] = {"review": "", "summary": ""}
+        
+        review = reviews[review_key]["review"]
         item_title = item2feature[str(item)]["title"]
         input_prompt = prompt.format(item_title=item_title,dataset_full_name=dataset_full_name,review=review)
         prompt_list.append(input_prompt)
+    
+    # 如果有缺失的 review，批量生成
+    if missing_reviews:
+        print(f"Found {len(missing_reviews)} missing reviews, generating them...")
+        generated_reviews = generate_missing_reviews(args, missing_reviews, item2feature, api_info)
+        # 更新 reviews 字典
+        reviews.update(generated_reviews)
+        # 重新构建 prompt_list，使用生成的 review
+        prompt_list = []
+        for i, (user, item, history) in enumerate(inter_data):
+            review_key = str((user, item))
+            review = reviews[review_key]["review"]
+            item_title = item2feature[str(item)]["title"]
+            input_prompt = prompt.format(item_title=item_title,dataset_full_name=dataset_full_name,review=review)
+            prompt_list.append(input_prompt)
 
     st = 0
     with open(intention_test_output_file, mode='a') as f:
