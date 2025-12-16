@@ -1,0 +1,6 @@
+{
+    "api_key": "dummy",
+    "base_url": "http://localhost:8000/v1",
+    "use_vllm": true,
+    "guided_decoding_backend": "outlines"
+}

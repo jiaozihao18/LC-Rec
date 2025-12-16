@@ -12,9 +12,27 @@ import collections
 from openai import OpenAI, APIError, APIConnectionError, RateLimitError, AuthenticationError
 
 
-def get_res_batch(model_name, prompt_list, api_info, response_format=None, system_message=None, use_json_object=False):
+def _is_vllm_service(base_url):
+    """
+    检测是否为vLLM服务（本地部署）
+    
+    Args:
+        base_url: API基础URL
+    
+    Returns:
+        bool: 如果是vLLM服务返回True，否则返回False
+    """
+    if base_url is None:
+        return False
+    vllm_indicators = ['localhost', '127.0.0.1', '0.0.0.0']
+    base_url_lower = base_url.lower()
+    return any(indicator in base_url_lower for indicator in vllm_indicators)
+
+
+def get_res_batch(model_name, prompt_list, api_info, response_format=None, system_message=None, use_json_object=False, guided_decoding_backend="outlines"):
     """
     批量调用大模型API，支持JSON Schema和JSON Object结构化输出
+    支持OpenAI兼容API和vLLM本地部署的结构化输出
     
     Args:
         model_name: 模型名称
@@ -22,10 +40,13 @@ def get_res_batch(model_name, prompt_list, api_info, response_format=None, syste
         api_info: API配置信息，包含：
             - api_key: API密钥
             - base_url: (可选) API基础URL，默认为dashscope北京地域
+                - 如果是vLLM服务，通常为 "http://localhost:8000/v1" 或 "http://0.0.0.0:8000/v1"
             - region: (可选) 地域，'beijing' 或 'singapore'
-        response_format: (可选) Pydantic模型类，用于JSON Schema结构化输出。如果提供，将使用parse方法
+            - use_vllm: (可选) 显式指定是否使用vLLM，如果不指定则根据base_url自动检测
+        response_format: (可选) Pydantic模型类，用于JSON Schema结构化输出。如果提供，将使用parse方法或guided_json
         system_message: (可选) 系统消息，如果为None，使用默认消息
         use_json_object: (可选) 是否使用JSON Object模式，如果为True，将返回JSON字符串
+        guided_decoding_backend: (可选) vLLM引导解码后端，可选值: "outlines", "lm-format-enforcer", "xgrammar"，默认为"outlines"
     
     Returns:
         output_list: 输出列表。如果使用response_format（JSON Schema），返回解析后的Pydantic对象列表；
@@ -41,6 +62,11 @@ def get_res_batch(model_name, prompt_list, api_info, response_format=None, syste
     if base_url is None:
         region = api_info.get("region", "beijing")
         base_url = "https://dashscope-intl.aliyuncs.com/compatible-mode/v1" if region == "singapore" else "https://dashscope.aliyuncs.com/compatible-mode/v1"
+    
+    # 检测是否为vLLM服务
+    use_vllm = api_info.get("use_vllm", None)
+    if use_vllm is None:
+        use_vllm = _is_vllm_service(base_url)
     
     # 创建客户端
     client = OpenAI(api_key=api_key, base_url=base_url)
@@ -63,24 +89,74 @@ def get_res_batch(model_name, prompt_list, api_info, response_format=None, syste
     for messages in messages_list:
         try:
             if response_format:
-                # 使用JSON Schema模式（parse方法）
-                completion = client.chat.completions.parse(
-                    model=model_name,
-                    messages=messages,
-                    temperature=0.4,
-                    response_format=response_format
-                )
-                # 获取解析后的Pydantic对象
-                parsed = completion.choices[0].message.parsed
-                output_list.append(parsed)
+                # 使用JSON Schema结构化输出
+                if use_vllm:
+                    # vLLM使用guided_json通过extra_body传递
+                    json_schema = response_format.model_json_schema()
+                    
+                    # 方法1: 使用beta.parse方法（推荐，自动解析）
+                    try:
+                        completion = client.beta.chat.completions.parse(
+                            model=model_name,
+                            messages=messages,
+                            temperature=0.4,
+                            response_format=response_format,
+                            extra_body={"guided_decoding_backend": guided_decoding_backend}
+                        )
+                        # 获取解析后的Pydantic对象
+                        parsed = completion.choices[0].message.parsed
+                        output_list.append(parsed)
+                    except Exception as parse_error:
+                        # 如果beta.parse方法失败，回退到使用create方法配合guided_json
+                        print(f"Warning: beta.parse failed, using guided_json fallback: {parse_error}")
+                        completion = client.chat.completions.create(
+                            model=model_name,
+                            messages=messages,
+                            temperature=0.4,
+                            extra_body={
+                                "guided_json": json_schema,
+                                "guided_decoding_backend": guided_decoding_backend
+                            }
+                        )
+                        # 手动解析JSON字符串
+                        json_str = completion.choices[0].message.content.strip()
+                        try:
+                            json_data = json.loads(json_str)
+                            parsed = response_format(**json_data)
+                            output_list.append(parsed)
+                        except (json.JSONDecodeError, Exception) as e:
+                            print(f"Failed to parse JSON response: {e}, content: {json_str}")
+                            output_list.append(None)
+                else:
+                    # OpenAI兼容API使用parse方法
+                    completion = client.chat.completions.parse(
+                        model=model_name,
+                        messages=messages,
+                        temperature=0.4,
+                        response_format=response_format
+                    )
+                    # 获取解析后的Pydantic对象
+                    parsed = completion.choices[0].message.parsed
+                    output_list.append(parsed)
             elif use_json_object:
                 # 使用JSON Object模式
-                completion = client.chat.completions.create(
-                    model=model_name,
-                    messages=messages,
-                    temperature=0.4,
-                    response_format={"type": "json_object"}
-                )
+                if use_vllm:
+                    # vLLM可以使用guided_json配合简单的JSON schema
+                    # 或者直接使用response_format
+                    completion = client.chat.completions.create(
+                        model=model_name,
+                        messages=messages,
+                        temperature=0.4,
+                        response_format={"type": "json_object"},
+                        extra_body={"guided_decoding_backend": guided_decoding_backend} if guided_decoding_backend else {}
+                    )
+                else:
+                    completion = client.chat.completions.create(
+                        model=model_name,
+                        messages=messages,
+                        temperature=0.4,
+                        response_format={"type": "json_object"}
+                    )
                 output = completion.choices[0].message.content.strip()
                 output_list.append(output)
             else:

@@ -4,7 +4,7 @@ import os
 import json
 from typing import Optional
 from pydantic import BaseModel, Field, ValidationError
-from utils import get_res_batch, load_json, unified_user_analysis_prompt, amazon18_dataset2fullname, write_json_file
+from utils import get_res_batch, load_json, unified_user_analysis_prompt, amazon18_dataset2fullname, write_json_file, _is_vllm_service
 
 
 def format_history_items(item_list, item2feature, max_his_len):
@@ -47,9 +47,17 @@ DEFAULT_PREFERENCES = {
 
 
 
-def generate_batch_submission_file(args, inters, item2feature, reviews, mode='train'):
+def generate_batch_submission_file(args, inters, item2feature, reviews, api_info=None, mode='train'):
     """
     生成批量提交文件（JSONL格式）用于离线批量推理
+    
+    Args:
+        args: 命令行参数
+        inters: 交互数据
+        item2feature: 商品特征字典
+        reviews: 评论数据
+        api_info: (可选) API配置信息，用于检测是否为vLLM服务
+        mode: 'train' 或 'test'
     """
     dataset_full_name = amazon18_dataset2fullname[args.dataset]
     dataset_full_name = dataset_full_name.replace("_", " ").lower()
@@ -100,33 +108,70 @@ def generate_batch_submission_file(args, inters, item2feature, reviews, mode='tr
     # 准备系统消息（json_object模式需要在消息中包含JSON关键词，prompt中已有）
     system_message = "You are a helpful assistant."
     
-    # 根据响应格式类型设置response_format
-    if args.response_format == 'json_object':
-        response_format_config = {"type": "json_object"}
-    else:  # json_schema
-        json_schema = UserAnalysisResponse.model_json_schema()
-        response_format_config = {
-            "type": "json_schema",
-            "json_schema": {
-                "name": "user_analysis_response",
-                "strict": True,
-                "schema": json_schema
-            }
-        }
+    # 检测是否为vLLM服务
+    use_vllm = False
+    if api_info:
+        base_url = api_info.get("base_url")
+        use_vllm = api_info.get("use_vllm", _is_vllm_service(base_url) if base_url else False)
+    
+    # 根据响应格式类型和是否使用vLLM设置request_body
+    json_schema = UserAnalysisResponse.model_json_schema()
+    guided_decoding_backend = api_info.get("guided_decoding_backend", "outlines") if api_info else "outlines"
     
     # 生成JSONL文件
     output_file = os.path.join(args.root, f'{args.dataset}_{mode}_batch_submission.jsonl')
     with open(output_file, 'w', encoding='utf-8') as f:
         for idx, prompt in enumerate(prompt_list):
             custom_id = f"{mode}_{idx}"
-            request_body = {
-                "model": args.model_name,
-                "messages": [
-                    {"role": "system", "content": system_message},
-                    {"role": "user", "content": prompt}
-                ],
-                "response_format": response_format_config
-            }
+            
+            if use_vllm:
+                # vLLM使用extra_body传递guided_json
+                if args.response_format == 'json_object':
+                    request_body = {
+                        "model": args.model_name,
+                        "messages": [
+                            {"role": "system", "content": system_message},
+                            {"role": "user", "content": prompt}
+                        ],
+                        "response_format": {"type": "json_object"},
+                        "extra_body": {
+                            "guided_decoding_backend": guided_decoding_backend
+                        }
+                    }
+                else:  # json_schema
+                    request_body = {
+                        "model": args.model_name,
+                        "messages": [
+                            {"role": "system", "content": system_message},
+                            {"role": "user", "content": prompt}
+                        ],
+                        "extra_body": {
+                            "guided_json": json_schema,
+                            "guided_decoding_backend": guided_decoding_backend
+                        }
+                    }
+            else:
+                # OpenAI兼容API使用response_format
+                if args.response_format == 'json_object':
+                    response_format_config = {"type": "json_object"}
+                else:  # json_schema
+                    response_format_config = {
+                        "type": "json_schema",
+                        "json_schema": {
+                            "name": "user_analysis_response",
+                            "strict": True,
+                            "schema": json_schema
+                        }
+                    }
+                
+                request_body = {
+                    "model": args.model_name,
+                    "messages": [
+                        {"role": "system", "content": system_message},
+                        {"role": "user", "content": prompt}
+                    ],
+                    "response_format": response_format_config
+                }
             
             request_obj = {
                 "custom_id": custom_id,
@@ -305,8 +350,8 @@ if __name__ == "__main__":
     if args.generate_batch_file:
         # 生成批量提交文件
         print("Generating batch submission files...")
-        train_file, train_user_data = generate_batch_submission_file(args, inters, item2feature, reviews, mode='train')
-        test_file, test_user_data = generate_batch_submission_file(args, inters, item2feature, reviews, mode='test')
+        train_file, train_user_data = generate_batch_submission_file(args, inters, item2feature, reviews, api_info, mode='train')
+        test_file, test_user_data = generate_batch_submission_file(args, inters, item2feature, reviews, api_info, mode='test')
         
         # 保存用户数据映射文件（用于后续解析结果）
         mapping_file = os.path.join(args.root, f'{args.dataset}_batch_mapping.json')
