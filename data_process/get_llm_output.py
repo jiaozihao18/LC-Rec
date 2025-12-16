@@ -2,7 +2,7 @@
 import argparse
 import os
 import json
-import re
+from pydantic import BaseModel, Field
 from utils import get_res_batch, load_json, unified_user_analysis_prompt, amazon18_dataset2fullname, write_json_file
 
 
@@ -24,6 +24,16 @@ def format_history_items(item_list, item2feature, max_his_len):
     return "\n".join(formatted_items)
 
 
+# 定义输出结构的Pydantic模型
+class UserAnalysisResponse(BaseModel):
+    """用户分析和意图提取的响应结构"""
+    general_preference: str = Field(description="用户整体偏好的简要第三人称总结")
+    long_term_preference: str = Field(description="用户长期偏好，反映在所有购买中的固有特征")
+    short_term_preference: str = Field(description="用户短期偏好，反映在最近购买中的偏好")
+    user_related_intention: str = Field(description="用户相关意图，从用户与目标商品的交互中推断出的个人偏好和需求")
+    item_related_intention: str = Field(description="商品相关意图，吸引用户的目标商品的特征和功能")
+
+
 # 默认值常量
 DEFAULT_PREFERENCES = {
     "general_preference": "The user enjoys high-quality items.",
@@ -32,31 +42,6 @@ DEFAULT_PREFERENCES = {
     "user_related_intention": "I enjoy high-quality items.",
     "item_related_intention": "High-quality item with good features."
 }
-
-
-def parse_json_response(response_text):
-    """解析JSON格式的响应（由于使用JSON格式输出，解析应该更简单）"""
-    response_text = response_text.strip()
-    
-    # 查找JSON对象
-    start_idx = response_text.find('{')
-    end_idx = response_text.rfind('}')
-    
-    if start_idx == -1 or end_idx == -1:
-        raise ValueError("No JSON object found in response")
-    
-    json_str = response_text[start_idx:end_idx+1]
-    
-    try:
-        return json.loads(json_str)
-    except json.JSONDecodeError as e:
-        # 如果解析失败，尝试修复常见问题
-        json_str = re.sub(r'//.*?\n', '', json_str)  # 移除注释
-        json_str = re.sub(r'/\*.*?\*/', '', json_str, flags=re.DOTALL)
-        try:
-            return json.loads(json_str)
-        except:
-            raise ValueError(f"Failed to parse JSON: {e}")
 
 
 
@@ -122,31 +107,23 @@ def generate_user_data(args, inters, item2feature, reviews, api_info, mode='trai
     while st < len(prompt_list):
         print(f"Processing {mode} data: {st}/{len(prompt_list)}")
         
-        res = get_res_batch(args.model_name, prompt_list[st:st+args.batchsize], args.max_tokens, api_info, use_json_format=True)
+        res = get_res_batch(args.model_name, prompt_list[st:st+args.batchsize], api_info, response_format=UserAnalysisResponse)
         
-        for i, answer in enumerate(res):
+        for i, parsed_response in enumerate(res):
             user, target_item, history = user_data_list[st + i]
             
-            # 解析响应
-            if not answer:
+            # 使用解析后的响应（已经是Pydantic对象）
+            if parsed_response is None:
                 print(f"Empty response for user {user}, using defaults")
                 parsed_data = DEFAULT_PREFERENCES.copy()
             else:
-                try:
-                    parsed_data = parse_json_response(answer)
-                    # 确保所有字段都存在，使用默认值填充缺失字段
-                    for key, default_value in DEFAULT_PREFERENCES.items():
-                        if key not in parsed_data:
-                            parsed_data[key] = default_value
-                except Exception as e:
-                    print(f"Failed to parse JSON for user {user}: {e}")
-                    print(f"Response: {answer[:200]}...")
-                    parsed_data = DEFAULT_PREFERENCES.copy()
+                # 将Pydantic对象转换为字典
+                parsed_data = parsed_response.model_dump()
             
             results[user] = {
                 "item": target_item,
                 "inters": history,
-                **{k: parsed_data[k] for k in DEFAULT_PREFERENCES.keys()}
+                **{k: parsed_data.get(k, DEFAULT_PREFERENCES[k]) for k in DEFAULT_PREFERENCES.keys()}
             }
         
         st += args.batchsize
@@ -159,8 +136,7 @@ def parse_args():
     parser.add_argument('--dataset', type=str, default='Instruments', help='Instruments / Arts / Games')
     parser.add_argument('--root', type=str, default='')
     parser.add_argument('--api_info', type=str, default='./api_info.json')
-    parser.add_argument('--model_name', type=str, default='text-davinci-003')
-    parser.add_argument('--max_tokens', type=int, default=1024)  # 增加token数以支持JSON输出
+    parser.add_argument('--model_name', type=str, default='qwen-plus', help='模型名称，如qwen-plus')
     parser.add_argument('--batchsize', type=int, default=16)
     parser.add_argument('--max_his_len', type=int, default=20)
     return parser.parse_args()

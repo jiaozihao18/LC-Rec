@@ -12,23 +12,22 @@ import collections
 from openai import OpenAI, APIError, APIConnectionError, RateLimitError, AuthenticationError
 
 
-def get_res_batch(model_name, prompt_list, max_tokens, api_info, use_json_format=False, system_message=None):
+def get_res_batch(model_name, prompt_list, api_info, response_format=None, system_message=None):
     """
-    批量调用大模型API
+    批量调用大模型API，支持JSON Schema结构化输出
     
     Args:
         model_name: 模型名称
         prompt_list: prompt列表
-        max_tokens: 最大token数
         api_info: API配置信息，包含：
             - api_key: API密钥
             - base_url: (可选) API基础URL，默认为dashscope北京地域
             - region: (可选) 地域，'beijing' 或 'singapore'
-        use_json_format: 是否使用JSON格式输出
-        system_message: (可选) 系统消息，如果为None且use_json_format=True，会自动添加JSON提示
+        response_format: (可选) Pydantic模型类，用于结构化输出。如果提供，将使用parse方法
+        system_message: (可选) 系统消息，如果为None，使用默认消息
     
     Returns:
-        output_list: 输出列表
+        output_list: 输出列表。如果使用response_format，返回解析后的Pydantic对象列表；否则返回字符串列表
     """
     # 获取API配置
     api_key = api_info.get("api_key") or api_info.get("api_key_list", [""])[0]
@@ -44,11 +43,9 @@ def get_res_batch(model_name, prompt_list, max_tokens, api_info, use_json_format
     # 创建客户端
     client = OpenAI(api_key=api_key, base_url=base_url)
     
-    # 准备系统消息（必须包含"JSON"关键词才能使用json_object格式）
+    # 准备系统消息
     if system_message is None:
-        system_message = "Please respond in JSON format. Your response must be valid JSON." if use_json_format else "You are a helpful assistant."
-    elif use_json_format and "json" not in system_message.lower():
-        system_message += " Please respond in JSON format."
+        system_message = "You are a helpful assistant."
     
     # 构建messages列表
     messages_list = [
@@ -62,18 +59,32 @@ def get_res_batch(model_name, prompt_list, max_tokens, api_info, use_json_format
     # 调用API
     output_list = []
     for messages in messages_list:
-        completion_params = {
-            "model": model_name,
-            "messages": messages,
-            "temperature": 0.4,
-            "max_tokens": max_tokens,
-        }
-        if use_json_format:
-            completion_params["response_format"] = {"type": "json_object"}
-        
-        completion = client.chat.completions.create(**completion_params)
-        output = completion.choices[0].message.content.strip()
-        output_list.append(output)
+        try:
+            if response_format:
+                # 使用parse方法进行结构化输出（不设置max_tokens）
+                completion = client.chat.completions.parse(
+                    model=model_name,
+                    messages=messages,
+                    temperature=0.4,
+                    response_format=response_format
+                )
+                # 获取解析后的Pydantic对象
+                parsed = completion.choices[0].message.parsed
+                output_list.append(parsed)
+            else:
+                # 普通文本输出
+                completion = client.chat.completions.create(
+                    model=model_name,
+                    messages=messages,
+                    temperature=0.4,
+                    max_tokens=1024
+                )
+                output = completion.choices[0].message.content.strip()
+                output_list.append(output)
+        except Exception as e:
+            print(f"API call failed: {e}")
+            # 如果使用结构化输出但失败，返回None
+            output_list.append(None)
     
     return output_list
 
