@@ -2,7 +2,8 @@
 import argparse
 import os
 import json
-from pydantic import BaseModel, Field
+from typing import Optional
+from pydantic import BaseModel, Field, ValidationError
 from utils import get_res_batch, load_json, unified_user_analysis_prompt, amazon18_dataset2fullname, write_json_file
 
 
@@ -96,11 +97,22 @@ def generate_batch_submission_file(args, inters, item2feature, reviews, mode='tr
         prompt_list.append(prompt)
         user_data_list.append((user, target_item, history))
     
-    # 生成JSON Schema（从Pydantic模型）
-    json_schema = UserAnalysisResponse.model_json_schema()
-    
-    # 准备系统消息
+    # 准备系统消息（json_object模式需要在消息中包含JSON关键词，prompt中已有）
     system_message = "You are a helpful assistant."
+    
+    # 根据响应格式类型设置response_format
+    if args.response_format == 'json_object':
+        response_format_config = {"type": "json_object"}
+    else:  # json_schema
+        json_schema = UserAnalysisResponse.model_json_schema()
+        response_format_config = {
+            "type": "json_schema",
+            "json_schema": {
+                "name": "user_analysis_response",
+                "strict": True,
+                "schema": json_schema
+            }
+        }
     
     # 生成JSONL文件
     output_file = os.path.join(args.root, f'{args.dataset}_{mode}_batch_submission.jsonl')
@@ -113,14 +125,7 @@ def generate_batch_submission_file(args, inters, item2feature, reviews, mode='tr
                     {"role": "system", "content": system_message},
                     {"role": "user", "content": prompt}
                 ],
-                "response_format": {
-                    "type": "json_schema",
-                    "json_schema": {
-                        "name": "user_analysis_response",
-                        "strict": True,
-                        "schema": json_schema
-                    }
-                }
+                "response_format": response_format_config
             }
             
             request_obj = {
@@ -134,6 +139,26 @@ def generate_batch_submission_file(args, inters, item2feature, reviews, mode='tr
     
     print(f"Generated batch submission file: {output_file} ({len(prompt_list)} requests)")
     return output_file, user_data_list
+
+
+def parse_json_object_response(json_string: str) -> Optional[UserAnalysisResponse]:
+    """
+    解析并验证JSON Object模式的响应
+    
+    Args:
+        json_string: JSON字符串
+    
+    Returns:
+        解析后的Pydantic对象，如果解析或验证失败返回None
+    """
+    try:
+        # 解析JSON字符串
+        json_data = json.loads(json_string)
+        # 使用Pydantic模型验证数据
+        return UserAnalysisResponse(**json_data)
+    except (json.JSONDecodeError, ValidationError) as e:
+        print(f"Failed to parse/validate JSON response: {e}")
+        return None
 
 
 def generate_user_data(args, inters, item2feature, reviews, api_info, mode='train'):
@@ -193,7 +218,25 @@ def generate_user_data(args, inters, item2feature, reviews, api_info, mode='trai
     while st < len(prompt_list):
         print(f"Processing {mode} data: {st}/{len(prompt_list)}")
         
-        res = get_res_batch(args.model_name, prompt_list[st:st+args.batchsize], api_info, response_format=UserAnalysisResponse)
+        # 根据响应格式类型调用不同的API
+        if args.response_format == 'json_object':
+            # 使用json_object模式，需要手动解析和验证
+            res = get_res_batch(args.model_name, prompt_list[st:st+args.batchsize], api_info, 
+                              response_format=None, use_json_object=True)
+            
+            # 解析JSON字符串并验证
+            parsed_responses = []
+            for json_str in res:
+                if json_str is None:
+                    parsed_responses.append(None)
+                else:
+                    parsed_response = parse_json_object_response(json_str)
+                    parsed_responses.append(parsed_response)
+            res = parsed_responses
+        else:
+            # 使用json_schema模式（默认）
+            res = get_res_batch(args.model_name, prompt_list[st:st+args.batchsize], api_info, 
+                              response_format=UserAnalysisResponse)
         
         for i, parsed_response in enumerate(res):
             user, target_item, history = user_data_list[st + i]
@@ -226,6 +269,8 @@ def parse_args():
     parser.add_argument('--batchsize', type=int, default=16)
     parser.add_argument('--max_his_len', type=int, default=20)
     parser.add_argument('--generate_batch_file', action='store_true', help='生成批量提交文件而不是直接调用API')
+    parser.add_argument('--response_format', type=str, default='json_schema', choices=['json_schema', 'json_object'],
+                       help='响应格式类型: json_schema (使用严格的JSON Schema) 或 json_object (使用JSON Object模式)')
     return parser.parse_args()
 
 
@@ -274,54 +319,53 @@ if __name__ == "__main__":
         write_json_file(mapping_data, mapping_file)
         print(f"Generated mapping file: {mapping_file}")
         print("Batch submission files generated. Please submit them for batch inference.")
-        return
-    
-    # 直接调用API生成数据
-    print("Generating train data...")
-    train_data = generate_user_data(args, inters, item2feature, reviews, api_info, mode='train')
-    
-    print("Generating test data...")
-    test_data = generate_user_data(args, inters, item2feature, reviews, api_info, mode='test')
+    else:
+        # 直接调用API生成数据
+        print("Generating train data...")
+        train_data = generate_user_data(args, inters, item2feature, reviews, api_info, mode='train')
+        
+        print("Generating test data...")
+        test_data = generate_user_data(args, inters, item2feature, reviews, api_info, mode='test')
 
-    # 构建最终的用户字典
-    user_dict = {
-        "user_explicit_preference": {},
-        "user_vague_intention": {
-            "train": {},
-            "test": {}
-        }
-    }
-
-    # 处理训练集数据（preference从train数据中提取，但每个用户只保存一次）
-    for user, data in train_data.items():
-        user_dict["user_explicit_preference"][user] = [
-            data["general_preference"],
-            data["long_term_preference"],
-            data["short_term_preference"]
-        ]
-        user_dict["user_vague_intention"]["train"][user] = {
-            "item": data["item"],
-            "inters": data["inters"],
-            "querys": [data["user_related_intention"], data["item_related_intention"]]
+        # 构建最终的用户字典
+        user_dict = {
+            "user_explicit_preference": {},
+            "user_vague_intention": {
+                "train": {},
+                "test": {}
+            }
         }
 
-    # 处理测试集数据（preference已经在train中设置，这里只设置intention）
-    for user, data in test_data.items():
-        # 如果用户不在训练集中，也设置preference
-        if user not in user_dict["user_explicit_preference"]:
+        # 处理训练集数据（preference从train数据中提取，但每个用户只保存一次）
+        for user, data in train_data.items():
             user_dict["user_explicit_preference"][user] = [
                 data["general_preference"],
                 data["long_term_preference"],
                 data["short_term_preference"]
             ]
-        
-        user_dict["user_vague_intention"]["test"][user] = {
-            "item": data["item"],
-            "inters": data["inters"],
-            "querys": [data["user_related_intention"], data["item_related_intention"]]
-        }
+            user_dict["user_vague_intention"]["train"][user] = {
+                "item": data["item"],
+                "inters": data["inters"],
+                "querys": [data["user_related_intention"], data["item_related_intention"]]
+            }
 
-    # 直接输出最终文件
-    output_file = os.path.join(args.root, f'{args.dataset}.user.json')
-    write_json_file(user_dict, output_file)
-    print(f"Successfully generated {output_file}")
+        # 处理测试集数据（preference已经在train中设置，这里只设置intention）
+        for user, data in test_data.items():
+            # 如果用户不在训练集中，也设置preference
+            if user not in user_dict["user_explicit_preference"]:
+                user_dict["user_explicit_preference"][user] = [
+                    data["general_preference"],
+                    data["long_term_preference"],
+                    data["short_term_preference"]
+                ]
+            
+            user_dict["user_vague_intention"]["test"][user] = {
+                "item": data["item"],
+                "inters": data["inters"],
+                "querys": [data["user_related_intention"], data["item_related_intention"]]
+            }
+
+        # 直接输出最终文件
+        output_file = os.path.join(args.root, f'{args.dataset}.user.json')
+        write_json_file(user_dict, output_file)
+        print(f"Successfully generated {output_file}")

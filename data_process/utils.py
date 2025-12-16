@@ -12,9 +12,9 @@ import collections
 from openai import OpenAI, APIError, APIConnectionError, RateLimitError, AuthenticationError
 
 
-def get_res_batch(model_name, prompt_list, api_info, response_format=None, system_message=None):
+def get_res_batch(model_name, prompt_list, api_info, response_format=None, system_message=None, use_json_object=False):
     """
-    批量调用大模型API，支持JSON Schema结构化输出
+    批量调用大模型API，支持JSON Schema和JSON Object结构化输出
     
     Args:
         model_name: 模型名称
@@ -23,11 +23,13 @@ def get_res_batch(model_name, prompt_list, api_info, response_format=None, syste
             - api_key: API密钥
             - base_url: (可选) API基础URL，默认为dashscope北京地域
             - region: (可选) 地域，'beijing' 或 'singapore'
-        response_format: (可选) Pydantic模型类，用于结构化输出。如果提供，将使用parse方法
+        response_format: (可选) Pydantic模型类，用于JSON Schema结构化输出。如果提供，将使用parse方法
         system_message: (可选) 系统消息，如果为None，使用默认消息
+        use_json_object: (可选) 是否使用JSON Object模式，如果为True，将返回JSON字符串
     
     Returns:
-        output_list: 输出列表。如果使用response_format，返回解析后的Pydantic对象列表；否则返回字符串列表
+        output_list: 输出列表。如果使用response_format（JSON Schema），返回解析后的Pydantic对象列表；
+                     如果使用use_json_object，返回JSON字符串列表；否则返回普通文本字符串列表
     """
     # 获取API配置
     api_key = api_info.get("api_key") or api_info.get("api_key_list", [""])[0]
@@ -61,7 +63,7 @@ def get_res_batch(model_name, prompt_list, api_info, response_format=None, syste
     for messages in messages_list:
         try:
             if response_format:
-                # 使用parse方法进行结构化输出（不设置max_tokens）
+                # 使用JSON Schema模式（parse方法）
                 completion = client.chat.completions.parse(
                     model=model_name,
                     messages=messages,
@@ -71,6 +73,16 @@ def get_res_batch(model_name, prompt_list, api_info, response_format=None, syste
                 # 获取解析后的Pydantic对象
                 parsed = completion.choices[0].message.parsed
                 output_list.append(parsed)
+            elif use_json_object:
+                # 使用JSON Object模式
+                completion = client.chat.completions.create(
+                    model=model_name,
+                    messages=messages,
+                    temperature=0.4,
+                    response_format={"type": "json_object"}
+                )
+                output = completion.choices[0].message.content.strip()
+                output_list.append(output)
             else:
                 # 普通文本输出
                 completion = client.chat.completions.create(
