@@ -175,36 +175,29 @@ def write_remap_index(unit2index, file):
             fp.write(unit + '\t' + str(unit2index[unit]) + '\n')
 
 
-unified_user_analysis_prompt = """You are analyzing a user's preferences and intentions based on their purchase history and interactions with items in the {dataset_full_name} category.
+unified_user_analysis_prompt = """Analyze user preferences and intentions based on purchase history and item interaction in {dataset_full_name} category.
 
-User's Purchase History (in chronological order):
+Purchase History:
 {history_items}
 
-Target Item for Analysis:
-- Title: {item_title}
-- Description: {item_description}
-- Brand: {item_brand}
-- Categories: {item_categories}
+Target Item:
+Title: {item_title}
+Description: {item_description}
 {review_section}
 
-Please analyze and extract the following information:
+Extract:
+1. User Preferences (from purchase history, third person):
+   - General: Overall preferences summary
+   - Long-term: Characteristics across all purchases
+   - Short-term: Recent purchase patterns
 
-1. **User Preferences** (based on purchase history only):
-   - General preference: A brief third-person summary of the user's overall preferences
-   - Long-term preference: Inherent characteristics reflected across all purchases
-   - Short-term preference: Recent preferences reflected in recent purchases
+2. User-Related Intention (first person, user's needs/motivations):
+   - What the user wants or needs, not the item itself
 
-2. **User-Related Intention** (based on the target item and review):
-   - Focus on the user's personal preferences, needs, and motivations inferred from their interaction with this item
-   - Describe what the user wants or needs, not the item itself
-   - Should be in first person from the user's perspective
+3. Item Characteristics (third person, objective item features):
+   - Item's attributes, features, and what makes it attractive
 
-3. **Item Characteristics** (based on the target item features):
-   - Focus on the objective characteristics, features, and attributes of the item itself
-   - Describe what makes this item attractive or suitable
-   - Should be in third person, describing the item objectively
-
-Please provide your analysis in the following JSON format:
+Output JSON format:
 {{
   "general_preference": "...",
   "long_term_preference": "...",
@@ -213,12 +206,10 @@ Please provide your analysis in the following JSON format:
   "item_related_intention": "..."
 }}
 
-Important notes:
-- All preferences should be in third person, concise, and general (avoid listing specific items)
-- User-related intention should be in first person, describing the user's needs and preferences (do not include the item title)
-- Item-related intention should be in third person, describing the item's objective characteristics and features
-- If review is not available, base user-related intention on item features, but item-related intention should focus on the item itself
-- Be specific but concise in your analysis"""
+Notes:
+- Preferences: third person, concise, general (no specific items)
+- User-related intention: first person, user's needs (exclude item title)
+- Item-related intention: third person, objective item characteristics"""
 
 
 # remove 'Magazine', 'Gift', 'Music', 'Kindle'

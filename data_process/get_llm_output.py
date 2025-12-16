@@ -75,13 +75,11 @@ def generate_user_data(args, inters, item2feature, reviews, api_info, mode='trai
         # 获取目标商品特征
         item_feat = item2feature[str(target_item)]
         item_title = item_feat.get('title', '')
-        item_description = item_feat.get('description', 'N/A')
-        item_brand = item_feat.get('brand', 'N/A')
-        item_categories = item_feat.get('categories', 'N/A')
+        item_description = item_feat.get('description') or 'N/A'
         
         # 获取review（如果存在）
         review = reviews.get(str((user, target_item)), {}).get('review', '')
-        review_section = f"\nUser Review: {review}" if review else "\nNote: No user review available for this item."
+        review_section = f"\nUser Review: {review}" if review else "\nNote: No user review available."
         
         # 对于preference，使用去掉最后3个的历史
         preference_history = item_list[:-3] if len(item_list) >= 3 else []
@@ -93,8 +91,6 @@ def generate_user_data(args, inters, item2feature, reviews, api_info, mode='trai
             history_items=preference_history_items,
             item_title=item_title,
             item_description=item_description,
-            item_brand=item_brand,
-            item_categories=item_categories,
             review_section=review_section
         )
         
