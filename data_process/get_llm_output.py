@@ -46,6 +46,96 @@ DEFAULT_PREFERENCES = {
 
 
 
+def generate_batch_submission_file(args, inters, item2feature, reviews, mode='train'):
+    """
+    生成批量提交文件（JSONL格式）用于离线批量推理
+    """
+    dataset_full_name = amazon18_dataset2fullname[args.dataset]
+    dataset_full_name = dataset_full_name.replace("_", " ").lower()
+    
+    prompt_list = []
+    user_data_list = []  # 存储(user, item, history)用于后续处理
+    
+    for user, item_list in inters.items():
+        user = int(user)
+        
+        # 根据模式选择目标item
+        if mode == 'train':
+            if len(item_list) < 3:
+                continue
+            target_item = int(item_list[-3])
+            history = item_list[:-3]
+        else:  # test
+            if len(item_list) < 1:
+                continue
+            target_item = int(item_list[-1])
+            history = item_list[:-1]
+        
+        # 获取目标商品特征
+        item_feat = item2feature[str(target_item)]
+        item_title = item_feat.get('title', '')
+        item_description = item_feat.get('description') or 'N/A'
+        
+        # 获取review（如果存在）
+        review = reviews.get(str((user, target_item)), {}).get('review', '')
+        review_section = f"\nUser Review: {review}" if review else "\nNote: No user review available."
+        
+        # 对于preference，使用去掉最后3个的历史
+        preference_history = item_list[:-3] if len(item_list) >= 3 else []
+        preference_history_items = format_history_items(preference_history, item2feature, args.max_his_len) if preference_history else "No purchase history available."
+        
+        # 构建prompt
+        prompt = unified_user_analysis_prompt.format(
+            dataset_full_name=dataset_full_name,
+            history_items=preference_history_items,
+            item_title=item_title,
+            item_description=item_description,
+            review_section=review_section
+        )
+        
+        prompt_list.append(prompt)
+        user_data_list.append((user, target_item, history))
+    
+    # 生成JSON Schema（从Pydantic模型）
+    json_schema = UserAnalysisResponse.model_json_schema()
+    
+    # 准备系统消息
+    system_message = "You are a helpful assistant."
+    
+    # 生成JSONL文件
+    output_file = os.path.join(args.root, f'{args.dataset}_{mode}_batch_submission.jsonl')
+    with open(output_file, 'w', encoding='utf-8') as f:
+        for idx, prompt in enumerate(prompt_list):
+            custom_id = f"{mode}_{idx}"
+            request_body = {
+                "model": args.model_name,
+                "messages": [
+                    {"role": "system", "content": system_message},
+                    {"role": "user", "content": prompt}
+                ],
+                "response_format": {
+                    "type": "json_schema",
+                    "json_schema": {
+                        "name": "user_analysis_response",
+                        "strict": True,
+                        "schema": json_schema
+                    }
+                }
+            }
+            
+            request_obj = {
+                "custom_id": custom_id,
+                "method": "POST",
+                "url": "/v1/chat/completions",
+                "body": request_body
+            }
+            
+            f.write(json.dumps(request_obj, ensure_ascii=False) + '\n')
+    
+    print(f"Generated batch submission file: {output_file} ({len(prompt_list)} requests)")
+    return output_file, user_data_list
+
+
 def generate_user_data(args, inters, item2feature, reviews, api_info, mode='train'):
     """
     生成用户意图数据（train或test模式）
@@ -135,6 +225,7 @@ def parse_args():
     parser.add_argument('--model_name', type=str, default='qwen-plus', help='模型名称，如qwen-plus')
     parser.add_argument('--batchsize', type=int, default=16)
     parser.add_argument('--max_his_len', type=int, default=20)
+    parser.add_argument('--generate_batch_file', action='store_true', help='生成批量提交文件而不是直接调用API')
     return parser.parse_args()
 
 
@@ -165,7 +256,27 @@ if __name__ == "__main__":
         print(f"Warning: {reviews_path} not found, using empty reviews")
         reviews = {}
 
-    # 生成训练集和测试集数据（每个都包含preference和intention）
+    # 根据参数决定是生成批量提交文件还是直接调用API
+    if args.generate_batch_file:
+        # 生成批量提交文件
+        print("Generating batch submission files...")
+        train_file, train_user_data = generate_batch_submission_file(args, inters, item2feature, reviews, mode='train')
+        test_file, test_user_data = generate_batch_submission_file(args, inters, item2feature, reviews, mode='test')
+        
+        # 保存用户数据映射文件（用于后续解析结果）
+        mapping_file = os.path.join(args.root, f'{args.dataset}_batch_mapping.json')
+        mapping_data = {
+            "train": {f"train_{i}": {"user": user, "item": item, "history": history} 
+                     for i, (user, item, history) in enumerate(train_user_data)},
+            "test": {f"test_{i}": {"user": user, "item": item, "history": history} 
+                    for i, (user, item, history) in enumerate(test_user_data)}
+        }
+        write_json_file(mapping_data, mapping_file)
+        print(f"Generated mapping file: {mapping_file}")
+        print("Batch submission files generated. Please submit them for batch inference.")
+        return
+    
+    # 直接调用API生成数据
     print("Generating train data...")
     train_data = generate_user_data(args, inters, item2feature, reviews, api_info, mode='train')
     
