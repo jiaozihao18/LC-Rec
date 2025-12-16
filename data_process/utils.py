@@ -9,60 +9,73 @@ import torch
 # import gensim
 from transformers import AutoModel, AutoTokenizer
 import collections
-import openai
+from openai import OpenAI, APIError, APIConnectionError, RateLimitError, AuthenticationError
 
 
-
-def get_res_batch(model_name, prompt_list, max_tokens, api_info):
-
-    while True:
-        try:
-            res = openai.Completion.create(
-                model=model_name,
-                prompt=prompt_list,
-                temperature=0.4,
-                max_tokens=max_tokens,
-                top_p=1,
-                frequency_penalty=0,
-                presence_penalty=0
-            )
-            output_list = []
-            for choice in res['choices']:
-                output = choice['text'].strip()
-                output_list.append(output)
-
-            return output_list
-
-        except openai.error.AuthenticationError as e:
-            print(e)
-            openai.api_key = api_info["api_key_list"].pop()
-            time.sleep(10)
-        except openai.error.RateLimitError as e:
-            print(e)
-            if str(e) == "You exceeded your current quota, please check your plan and billing details.":
-                openai.api_key = api_info["api_key_list"].pop()
-                time.sleep(10)
-            else:
-                print('\nopenai.error.RateLimitError\nRetrying...')
-                time.sleep(10)
-        except openai.error.ServiceUnavailableError as e:
-            print(e)
-            print('\nopenai.error.ServiceUnavailableError\nRetrying...')
-            time.sleep(10)
-        except openai.error.Timeout:
-            print('\nopenai.error.Timeout\nRetrying...')
-            time.sleep(10)
-        except openai.error.APIError as e:
-            print(e)
-            print('\nopenai.error.APIError\nRetrying...')
-            time.sleep(10)
-        except openai.error.APIConnectionError as e:
-            print(e)
-            print('\nopenai.error.APIConnectionError\nRetrying...')
-            time.sleep(10)
-        except Exception as e:
-            print(e)
-            return None
+def get_res_batch(model_name, prompt_list, max_tokens, api_info, use_json_format=False, system_message=None):
+    """
+    批量调用大模型API
+    
+    Args:
+        model_name: 模型名称
+        prompt_list: prompt列表
+        max_tokens: 最大token数
+        api_info: API配置信息，包含：
+            - api_key: API密钥
+            - base_url: (可选) API基础URL，默认为dashscope北京地域
+            - region: (可选) 地域，'beijing' 或 'singapore'
+        use_json_format: 是否使用JSON格式输出
+        system_message: (可选) 系统消息，如果为None且use_json_format=True，会自动添加JSON提示
+    
+    Returns:
+        output_list: 输出列表
+    """
+    # 获取API配置
+    api_key = api_info.get("api_key") or api_info.get("api_key_list", [""])[0]
+    if not api_key:
+        raise ValueError("api_info must contain 'api_key'")
+    
+    # 确定base_url
+    base_url = api_info.get("base_url")
+    if base_url is None:
+        region = api_info.get("region", "beijing")
+        base_url = "https://dashscope-intl.aliyuncs.com/compatible-mode/v1" if region == "singapore" else "https://dashscope.aliyuncs.com/compatible-mode/v1"
+    
+    # 创建客户端
+    client = OpenAI(api_key=api_key, base_url=base_url)
+    
+    # 准备系统消息（必须包含"JSON"关键词才能使用json_object格式）
+    if system_message is None:
+        system_message = "Please respond in JSON format. Your response must be valid JSON." if use_json_format else "You are a helpful assistant."
+    elif use_json_format and "json" not in system_message.lower():
+        system_message += " Please respond in JSON format."
+    
+    # 构建messages列表
+    messages_list = [
+        [
+            {"role": "system", "content": system_message},
+            {"role": "user", "content": prompt}
+        ]
+        for prompt in prompt_list
+    ]
+    
+    # 调用API
+    output_list = []
+    for messages in messages_list:
+        completion_params = {
+            "model": model_name,
+            "messages": messages,
+            "temperature": 0.4,
+            "max_tokens": max_tokens,
+        }
+        if use_json_format:
+            completion_params["response_format"] = {"type": "json_object"}
+        
+        completion = client.chat.completions.create(**completion_params)
+        output = completion.choices[0].message.content.strip()
+        output_list.append(output)
+    
+    return output_list
 
 
 
@@ -151,25 +164,43 @@ def write_remap_index(unit2index, file):
             fp.write(unit + '\t' + str(unit2index[unit]) + '\n')
 
 
-intention_prompt = "After purchasing a {dataset_full_name} item named \"{item_title}\", the user left a comment expressing his opinion and personal preferences. The user's comment is as follows: \n\"{review}\" " \
-                    "\nAs we all know, user comments often contain information about both their personal preferences and the characteristics of the item they interacted with. From this comment, you can infer both the user's personal preferences and the characteristics of the item. " \
-                    "Please describe your inferred user preferences and item characteristics in the first person and in the following format:\n\nMy preferences: []\nThe item's characteristics: []\n\n" \
-                    "Note that your inference of the personalized preferences should not include any information about the title of the item."
+unified_user_analysis_prompt = """You are analyzing a user's preferences and intentions based on their purchase history and interactions with items in the {dataset_full_name} category.
 
+User's Purchase History (in chronological order):
+{history_items}
 
-preference_prompt_1 = "Suppose the user has bought a variety of {dataset_full_name} items, they are: \n{item_titles}. \nAs we all know, these historically purchased items serve as a reflection of the user's personalized preferences. " \
-                        "Please analyze the user's personalized preferences based on the items he has bought and provide a brief third-person summary of the user's preferences, highlighting the key factors that influence his choice of items. Avoid listing specific items and do not list multiple examples. " \
-                        "Your analysis should be brief and in the third person."
+Target Item for Analysis:
+- Title: {item_title}
+- Description: {item_description}
+- Brand: {item_brand}
+- Categories: {item_categories}
+{review_section}
 
-preference_prompt_2 = "Given a chronological list of {dataset_full_name} items that a user has purchased, we can analyze his long-term and short-term preferences. Long-term preferences are inherent characteristics of the user, which are reflected in all the items he has interacted with over time. Short-term preferences are the user's recent preferences, which are reflected in some of the items he has bought more recently. " \
-                        "To determine the user's long-term preferences, please analyze the contents of all the items he has bought. Look for common features that appear frequently across the user's shopping records. To determine the user's short-term preferences, focus on the items he has bought most recently. Identify any new or different features that have emerged in the user's shopping records. " \
-                        "Here is a chronological list of items that the user has bought: \n{item_titles}. \nPlease provide separate analyses for the user's long-term and short-term preferences. Your answer should be concise and general, without listing specific items. Your answer should be in the third person and in the following format:\n\nLong-term preferences: []\nShort-term preferences: []\n\n"
+Please analyze and extract the following information:
 
-review_generation_prompt = "A user has purchased a {dataset_full_name} item named \"{item_title}\". " \
-                            "Please generate a realistic user review comment for this item. " \
-                            "The review should express the user's opinion and personal preferences about the item. " \
-                            "Make it sound natural and authentic, similar to real customer reviews. " \
-                            "The review should be concise (1-3 sentences) and focus on the item's characteristics and the user's experience."
+1. **User Preferences** (based on purchase history):
+   - General preference: A brief third-person summary of the user's overall preferences
+   - Long-term preference: Inherent characteristics reflected across all purchases
+   - Short-term preference: Recent preferences reflected in recent purchases
+
+2. **User Intentions** (based on the target item and review):
+   - User-related intention: The user's personal preferences and needs inferred from their interaction with this item
+   - Item-related intention: The characteristics and features of this item that attracted the user
+
+Please provide your analysis in the following JSON format:
+{{
+  "general_preference": "...",
+  "long_term_preference": "...",
+  "short_term_preference": "...",
+  "user_related_intention": "...",
+  "item_related_intention": "..."
+}}
+
+Important notes:
+- All preferences should be in third person, concise, and general (avoid listing specific items)
+- User-related intention should not include the item title
+- If review is not available, base intentions only on item features
+- Be specific but concise in your analysis"""
 
 
 # remove 'Magazine', 'Gift', 'Music', 'Kindle'
