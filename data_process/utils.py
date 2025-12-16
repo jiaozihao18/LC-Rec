@@ -189,14 +189,20 @@ Target Item for Analysis:
 
 Please analyze and extract the following information:
 
-1. **User Preferences** (based on purchase history):
+1. **User Preferences** (based on purchase history only):
    - General preference: A brief third-person summary of the user's overall preferences
    - Long-term preference: Inherent characteristics reflected across all purchases
    - Short-term preference: Recent preferences reflected in recent purchases
 
-2. **User Intentions** (based on the target item and review):
-   - User-related intention: The user's personal preferences and needs inferred from their interaction with this item
-   - Item-related intention: The characteristics and features of this item that attracted the user
+2. **User-Related Intention** (based on the target item and review):
+   - Focus on the user's personal preferences, needs, and motivations inferred from their interaction with this item
+   - Describe what the user wants or needs, not the item itself
+   - Should be in first person from the user's perspective
+
+3. **Item Characteristics** (based on the target item features):
+   - Focus on the objective characteristics, features, and attributes of the item itself
+   - Describe what makes this item attractive or suitable
+   - Should be in third person, describing the item objectively
 
 Please provide your analysis in the following JSON format:
 {{
@@ -209,8 +215,9 @@ Please provide your analysis in the following JSON format:
 
 Important notes:
 - All preferences should be in third person, concise, and general (avoid listing specific items)
-- User-related intention should not include the item title
-- If review is not available, base intentions only on item features
+- User-related intention should be in first person, describing the user's needs and preferences (do not include the item title)
+- Item-related intention should be in third person, describing the item's objective characteristics and features
+- If review is not available, base user-related intention on item features, but item-related intention should focus on the item itself
 - Be specific but concise in your analysis"""
 
 

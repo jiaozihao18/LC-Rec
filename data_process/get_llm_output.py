@@ -30,8 +30,8 @@ class UserAnalysisResponse(BaseModel):
     general_preference: str = Field(description="用户整体偏好的简要第三人称总结")
     long_term_preference: str = Field(description="用户长期偏好，反映在所有购买中的固有特征")
     short_term_preference: str = Field(description="用户短期偏好，反映在最近购买中的偏好")
-    user_related_intention: str = Field(description="用户相关意图，从用户与目标商品的交互中推断出的个人偏好和需求")
-    item_related_intention: str = Field(description="商品相关意图，吸引用户的目标商品的特征和功能")
+    user_related_intention: str = Field(description="用户相关意图，以第一人称描述用户的个人偏好、需求和动机")
+    item_related_intention: str = Field(description="商品特征，以第三人称客观描述商品本身的特征、功能和属性")
 
 
 # 默认值常量
