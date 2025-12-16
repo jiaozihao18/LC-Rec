@@ -140,23 +140,21 @@ def get_res_batch(model_name, prompt_list, api_info, response_format=None, syste
                     output_list.append(parsed)
             elif use_json_object:
                 # 使用JSON Object模式
+                # 注意：vLLM不支持标准的json_object模式，应该使用response_format参数
+                # 这里只处理OpenAI兼容API的情况
                 if use_vllm:
-                    # vLLM可以使用guided_json配合简单的JSON schema
-                    # 或者直接使用response_format
-                    completion = client.chat.completions.create(
-                        model=model_name,
-                        messages=messages,
-                        temperature=0.4,
-                        response_format={"type": "json_object"},
-                        extra_body={"guided_decoding_backend": guided_decoding_backend} if guided_decoding_backend else {}
-                    )
-                else:
-                    completion = client.chat.completions.create(
-                        model=model_name,
-                        messages=messages,
-                        temperature=0.4,
-                        response_format={"type": "json_object"}
-                    )
+                    # vLLM应该使用response_format参数而不是use_json_object
+                    # 如果代码执行到这里，说明调用方式有误
+                    raise ValueError("vLLM does not support standard json_object mode via use_json_object parameter. "
+                                   "Please use response_format parameter with Pydantic model instead.")
+                
+                # OpenAI兼容API使用标准的json_object模式
+                completion = client.chat.completions.create(
+                    model=model_name,
+                    messages=messages,
+                    temperature=0.4,
+                    response_format={"type": "json_object"}
+                )
                 output = completion.choices[0].message.content.strip()
                 output_list.append(output)
             else:

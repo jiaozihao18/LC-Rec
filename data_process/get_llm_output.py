@@ -125,31 +125,20 @@ def generate_batch_submission_file(args, inters, item2feature, reviews, api_info
             custom_id = f"{mode}_{idx}"
             
             if use_vllm:
-                # vLLM使用extra_body传递guided_json
-                if args.response_format == 'json_object':
-                    request_body = {
-                        "model": args.model_name,
-                        "messages": [
-                            {"role": "system", "content": system_message},
-                            {"role": "user", "content": prompt}
-                        ],
-                        "response_format": {"type": "json_object"},
-                        "extra_body": {
-                            "guided_decoding_backend": guided_decoding_backend
-                        }
+                # vLLM使用extra_body传递guided_json实现结构化输出
+                # vLLM不支持标准的response_format={"type": "json_object"}
+                # 对于json_object模式，也使用guided_json（使用完整的JSON Schema）
+                request_body = {
+                    "model": args.model_name,
+                    "messages": [
+                        {"role": "system", "content": system_message},
+                        {"role": "user", "content": prompt}
+                    ],
+                    "extra_body": {
+                        "guided_json": json_schema,
+                        "guided_decoding_backend": guided_decoding_backend
                     }
-                else:  # json_schema
-                    request_body = {
-                        "model": args.model_name,
-                        "messages": [
-                            {"role": "system", "content": system_message},
-                            {"role": "user", "content": prompt}
-                        ],
-                        "extra_body": {
-                            "guided_json": json_schema,
-                            "guided_decoding_backend": guided_decoding_backend
-                        }
-                    }
+                }
             else:
                 # OpenAI兼容API使用response_format
                 if args.response_format == 'json_object':
@@ -263,9 +252,14 @@ def generate_user_data(args, inters, item2feature, reviews, api_info, mode='trai
     while st < len(prompt_list):
         print(f"Processing {mode} data: {st}/{len(prompt_list)}")
         
-        # 根据响应格式类型调用不同的API
-        if args.response_format == 'json_object':
-            # 使用json_object模式，需要手动解析和验证
+        # 检测是否为vLLM服务
+        base_url = api_info.get("base_url") if api_info else None
+        use_vllm = api_info.get("use_vllm", _is_vllm_service(base_url) if base_url else False) if api_info else False
+        
+        # 根据响应格式类型和是否使用vLLM调用不同的API
+        # 注意：vLLM不支持标准的json_object模式，两种模式都使用guided_json
+        if args.response_format == 'json_object' and not use_vllm:
+            # 使用json_object模式（仅适用于OpenAI兼容API），需要手动解析和验证
             res = get_res_batch(args.model_name, prompt_list[st:st+args.batchsize], api_info, 
                               response_format=None, use_json_object=True)
             
@@ -279,7 +273,8 @@ def generate_user_data(args, inters, item2feature, reviews, api_info, mode='trai
                     parsed_responses.append(parsed_response)
             res = parsed_responses
         else:
-            # 使用json_schema模式（默认）
+            # 使用json_schema模式（默认），或者vLLM使用json_object模式时也使用完整的schema
+            # 对于vLLM，json_object和json_schema都使用guided_json + 完整schema
             res = get_res_batch(args.model_name, prompt_list[st:st+args.batchsize], api_info, 
                               response_format=UserAnalysisResponse)
         
