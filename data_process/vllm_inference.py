@@ -9,7 +9,6 @@ import json
 import re
 from typing import Optional
 from openai import OpenAI
-from utils import load_json, _is_vllm_service
 
 
 def extract_json_from_text(text: str) -> Optional[str]:
@@ -57,17 +56,16 @@ def extract_json_from_text(text: str) -> Optional[str]:
     return None
 
 
-def vllm_inference_batch(client, model_name, prompt_list, system_message="You are a helpful assistant.", 
-                        batch_size=16, enable_thinking=None, max_tokens=1024):
+def vllm_inference(client, model_name, prompt_list, system_message="You are a helpful assistant.", 
+                   enable_thinking=None, max_tokens=1024):
     """
-    使用vLLM进行批量推理（prompt_only模式）
+    使用vLLM进行推理（prompt_only模式）
     
     Args:
         client: OpenAI客户端
         model_name: 模型名称
         prompt_list: prompt列表
         system_message: 系统消息
-        batch_size: 批次大小
         enable_thinking: 是否启用thinking功能（None表示使用默认，False表示禁用）
         max_tokens: 最大token数
     
@@ -88,27 +86,26 @@ def vllm_inference_batch(client, model_name, prompt_list, system_message="You ar
         for prompt in prompt_list
     ]
     
-    # 批量调用
+    # 逐个调用
     output_list = []
-    for i in range(0, len(messages_list), batch_size):
-        batch_messages = messages_list[i:i+batch_size]
-        print(f"Processing batch {i//batch_size + 1}/{(len(messages_list) + batch_size - 1)//batch_size} "
-              f"({i+1}-{min(i+batch_size, len(messages_list))}/{len(messages_list)})")
+    total = len(messages_list)
+    for i, messages in enumerate(messages_list):
+        if (i + 1) % 10 == 0 or (i + 1) == total:
+            print(f"Processing {i+1}/{total}")
         
-        for messages in batch_messages:
-            try:
-                completion = client.chat.completions.create(
-                    model=model_name,
-                    messages=messages,
-                    temperature=0.4,
-                    max_tokens=max_tokens,
-                    extra_body=extra_body if extra_body else None
-                )
-                output = completion.choices[0].message.content.strip()
-                output_list.append(output)
-            except Exception as e:
-                print(f"API call failed: {e}")
-                output_list.append(None)
+        try:
+            completion = client.chat.completions.create(
+                model=model_name,
+                messages=messages,
+                temperature=0.4,
+                max_tokens=max_tokens,
+                extra_body=extra_body if extra_body else None
+            )
+            output = completion.choices[0].message.content.strip()
+            output_list.append(output)
+        except Exception as e:
+            print(f"API call failed for prompt {i+1}: {e}")
+            output_list.append(None)
     
     return output_list
 
@@ -149,10 +146,10 @@ def save_results(results, output_file):
 def parse_args():
     parser = argparse.ArgumentParser(description='基于vLLM进行在线推理')
     parser.add_argument('--prompt_file', type=str, required=True, help='输入的prompt文件路径（JSONL格式）')
-    parser.add_argument('--api_info', type=str, required=True, help='API配置信息文件路径')
+    parser.add_argument('--base_url', type=str, required=True, help='vLLM服务的基础URL，例如: http://localhost:8000/v1')
+    parser.add_argument('--api_key', type=str, default='dummy', help='API密钥（vLLM可以使用dummy）')
     parser.add_argument('--model_name', type=str, required=True, help='模型名称')
     parser.add_argument('--output', type=str, default='', help='输出文件路径（如果不指定，使用默认路径）')
-    parser.add_argument('--batch_size', type=int, default=16, help='批次大小')
     parser.add_argument('--max_tokens', type=int, default=1024, help='最大token数')
     parser.add_argument('--enable_thinking', type=str, default=None,
                        help='是否启用thinking功能。可选值: true/1/yes, false/0/no, 或不设置（None，使用默认行为）')
@@ -173,23 +170,8 @@ if __name__ == "__main__":
         elif v_lower in ('false', '0', 'no'):
             enable_thinking = False
     
-    # 加载API配置
-    api_info = load_json(args.api_info)
-    if "api_key" not in api_info:
-        raise ValueError("api_info must contain 'api_key'")
-    
-    api_key = api_info.get("api_key")
-    base_url = api_info.get("base_url")
-    if base_url is None:
-        raise ValueError("api_info must contain 'base_url' for vLLM service")
-    
-    # 验证是否为vLLM服务
-    use_vllm = api_info.get("use_vllm", _is_vllm_service(base_url))
-    if not use_vllm:
-        print("Warning: base_url does not appear to be a vLLM service. Proceeding anyway...")
-    
     # 创建客户端
-    client = OpenAI(api_key=api_key, base_url=base_url)
+    client = OpenAI(api_key=args.api_key, base_url=args.base_url)
     
     # 加载prompt文件
     print(f"Loading prompts from {args.prompt_file}...")
@@ -201,11 +183,10 @@ if __name__ == "__main__":
     
     # 进行推理
     print("Starting inference...")
-    outputs = vllm_inference_batch(
+    outputs = vllm_inference(
         client=client,
         model_name=args.model_name,
         prompt_list=prompt_list,
-        batch_size=args.batch_size,
         enable_thinking=enable_thinking,
         max_tokens=args.max_tokens
     )
