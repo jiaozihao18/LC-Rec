@@ -56,58 +56,87 @@ def extract_json_from_text(text: str) -> Optional[str]:
     return None
 
 
-def vllm_inference(client, model_name, prompt_list, system_message="You are a helpful assistant.", 
-                   enable_thinking=None, max_tokens=1024):
+def vllm_inference_streaming(client, model_name, prompts, output_file, system_message="You are a helpful assistant.", 
+                             enable_thinking=None, max_tokens=1024, extract_json=False):
     """
-    使用vLLM进行推理（prompt_only模式）
+    使用vLLM进行推理（prompt_only模式），每10个结果就写入文件
     
     Args:
         client: OpenAI客户端
         model_name: 模型名称
-        prompt_list: prompt列表
+        prompts: prompt记录列表（包含id, user, item, history, prompt等）
+        output_file: 输出文件路径
         system_message: 系统消息
         enable_thinking: 是否启用thinking功能（None表示使用默认，False表示禁用）
         max_tokens: 最大token数
-    
-    Returns:
-        output_list: 输出列表（原始文本）
+        extract_json: 是否从输出中提取JSON
     """
     # 准备extra_body参数（用于thinking控制）
     extra_body = {}
     if enable_thinking is False:
         extra_body["chat_template_kwargs"] = {"enable_thinking": False}
     
-    # 构建messages列表
-    messages_list = [
-        [
-            {"role": "system", "content": system_message},
-            {"role": "user", "content": prompt}
-        ]
-        for prompt in prompt_list
-    ]
+    total = len(prompts)
+    buffer = []  # 缓冲区，每10个写入一次
     
-    # 逐个调用
-    output_list = []
-    total = len(messages_list)
-    for i, messages in enumerate(messages_list):
-        if (i + 1) % 10 == 0 or (i + 1) == total:
-            print(f"Processing {i+1}/{total}")
-        
-        try:
-            completion = client.chat.completions.create(
-                model=model_name,
-                messages=messages,
-                temperature=0.4,
-                max_tokens=max_tokens,
-                extra_body=extra_body if extra_body else None
-            )
-            output = completion.choices[0].message.content.strip()
-            output_list.append(output)
-        except Exception as e:
-            print(f"API call failed for prompt {i+1}: {e}")
-            output_list.append(None)
+    # 打开文件（追加模式，如果文件已存在则追加）
+    file_mode = 'a' if os.path.exists(output_file) else 'w'
     
-    return output_list
+    with open(output_file, file_mode, encoding='utf-8') as f:
+        for i, record in enumerate(prompts):
+            prompt = record["prompt"]
+            messages = [
+                {"role": "system", "content": system_message},
+                {"role": "user", "content": prompt}
+            ]
+            
+            if (i + 1) % 10 == 0 or (i + 1) == total:
+                print(f"Processing {i+1}/{total}")
+            
+            try:
+                completion = client.chat.completions.create(
+                    model=model_name,
+                    messages=messages,
+                    temperature=0.4,
+                    max_tokens=max_tokens,
+                    extra_body=extra_body if extra_body else None
+                )
+                output = completion.choices[0].message.content.strip()
+            except Exception as e:
+                print(f"API call failed for prompt {i+1}: {e}")
+                output = None
+            
+            # 构建结果
+            result = {
+                "id": record.get("id"),
+                "user": record.get("user"),
+                "item": record.get("item"),
+                "history": record.get("history"),
+                "prompt": record.get("prompt"),
+                "output": output
+            }
+            
+            # 如果需要提取JSON
+            if extract_json and output:
+                json_str = extract_json_from_text(output)
+                if json_str:
+                    try:
+                        result["extracted_json"] = json.loads(json_str)
+                    except json.JSONDecodeError:
+                        result["extracted_json"] = None
+                else:
+                    result["extracted_json"] = None
+            
+            buffer.append(result)
+            
+            # 每10个或最后一个就写入文件
+            if len(buffer) >= 10 or (i + 1) == total:
+                for res in buffer:
+                    f.write(json.dumps(res, ensure_ascii=False) + '\n')
+                f.flush()  # 确保立即写入磁盘
+                buffer = []
+    
+    print(f"Saved {total} results to {output_file}")
 
 
 def load_prompts_file(prompt_file):
@@ -126,21 +155,6 @@ def load_prompts_file(prompt_file):
             if line.strip():
                 prompts.append(json.loads(line))
     return prompts
-
-
-def save_results(results, output_file):
-    """
-    保存推理结果
-    
-    Args:
-        results: 结果列表，每个元素包含原始记录和推理结果
-        output_file: 输出文件路径
-    """
-    with open(output_file, 'w', encoding='utf-8') as f:
-        for result in results:
-            f.write(json.dumps(result, ensure_ascii=False) + '\n')
-    
-    print(f"Saved {len(results)} results to {output_file}")
 
 
 def parse_args():
@@ -173,49 +187,6 @@ if __name__ == "__main__":
     # 创建客户端
     client = OpenAI(api_key=args.api_key, base_url=args.base_url)
     
-    # 加载prompt文件
-    print(f"Loading prompts from {args.prompt_file}...")
-    prompts = load_prompts_file(args.prompt_file)
-    print(f"Loaded {len(prompts)} prompts")
-    
-    # 提取prompt列表
-    prompt_list = [record["prompt"] for record in prompts]
-    
-    # 进行推理
-    print("Starting inference...")
-    outputs = vllm_inference(
-        client=client,
-        model_name=args.model_name,
-        prompt_list=prompt_list,
-        enable_thinking=enable_thinking,
-        max_tokens=args.max_tokens
-    )
-    
-    # 构建结果
-    results = []
-    for record, output in zip(prompts, outputs):
-        result = {
-            "id": record.get("id"),
-            "user": record.get("user"),
-            "item": record.get("item"),
-            "history": record.get("history"),
-            "prompt": record.get("prompt"),
-            "output": output
-        }
-        
-        # 如果需要提取JSON
-        if args.extract_json and output:
-            json_str = extract_json_from_text(output)
-            if json_str:
-                try:
-                    result["extracted_json"] = json.loads(json_str)
-                except json.JSONDecodeError:
-                    result["extracted_json"] = None
-            else:
-                result["extracted_json"] = None
-        
-        results.append(result)
-    
     # 确定输出文件路径
     if args.output:
         output_file = args.output
@@ -223,7 +194,22 @@ if __name__ == "__main__":
         base_name = os.path.splitext(args.prompt_file)[0]
         output_file = f"{base_name}_results.jsonl"
     
-    # 保存结果
-    save_results(results, output_file)
+    # 加载prompt文件
+    print(f"Loading prompts from {args.prompt_file}...")
+    prompts = load_prompts_file(args.prompt_file)
+    print(f"Loaded {len(prompts)} prompts")
+    
+    # 进行推理并实时写入文件
+    print("Starting inference...")
+    vllm_inference_streaming(
+        client=client,
+        model_name=args.model_name,
+        prompts=prompts,
+        output_file=output_file,
+        enable_thinking=enable_thinking,
+        max_tokens=args.max_tokens,
+        extract_json=args.extract_json
+    )
+    
     print("Inference completed!")
 
