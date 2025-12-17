@@ -2,6 +2,7 @@
 import argparse
 import os
 import json
+import re
 from typing import Optional
 from pydantic import BaseModel, Field, ValidationError
 from utils import get_res_batch, load_json, unified_user_analysis_prompt, amazon18_dataset2fullname, write_json_file, _is_vllm_service
@@ -141,8 +142,25 @@ def generate_batch_submission_file(args, inters, item2feature, reviews, api_info
                 }
             else:
                 # OpenAI兼容API使用response_format
-                if args.response_format == 'json_object':
+                if args.response_format == 'prompt_only':
+                    # prompt_only模式：不设置response_format，仅通过prompt引导
+                    request_body = {
+                        "model": args.model_name,
+                        "messages": [
+                            {"role": "system", "content": system_message},
+                            {"role": "user", "content": prompt}
+                        ]
+                    }
+                elif args.response_format == 'json_object':
                     response_format_config = {"type": "json_object"}
+                    request_body = {
+                        "model": args.model_name,
+                        "messages": [
+                            {"role": "system", "content": system_message},
+                            {"role": "user", "content": prompt}
+                        ],
+                        "response_format": response_format_config
+                    }
                 else:  # json_schema
                     response_format_config = {
                         "type": "json_schema",
@@ -152,15 +170,14 @@ def generate_batch_submission_file(args, inters, item2feature, reviews, api_info
                             "schema": json_schema
                         }
                     }
-                
-                request_body = {
-                    "model": args.model_name,
-                    "messages": [
-                        {"role": "system", "content": system_message},
-                        {"role": "user", "content": prompt}
-                    ],
-                    "response_format": response_format_config
-                }
+                    request_body = {
+                        "model": args.model_name,
+                        "messages": [
+                            {"role": "system", "content": system_message},
+                            {"role": "user", "content": prompt}
+                        ],
+                        "response_format": response_format_config
+                    }
             
             request_obj = {
                 "custom_id": custom_id,
@@ -175,6 +192,51 @@ def generate_batch_submission_file(args, inters, item2feature, reviews, api_info
     return output_file, user_data_list
 
 
+def extract_json_from_text(text: str) -> Optional[str]:
+    """
+    从文本中提取JSON字符串（可能包含markdown代码块或其他文本）
+    
+    Args:
+        text: 可能包含JSON的文本
+    
+    Returns:
+        提取的JSON字符串，如果提取失败返回None
+    """
+    if not text:
+        return None
+    
+    # 尝试直接解析（如果整个文本就是JSON）
+    text = text.strip()
+    if text.startswith('{') and text.endswith('}'):
+        try:
+            json.loads(text)
+            return text
+        except json.JSONDecodeError:
+            pass
+    
+    # 尝试从markdown代码块中提取
+    # 匹配 ```json ... ``` 或 ``` ... ```
+    json_pattern = r'```(?:json)?\s*(\{.*?\})\s*```'
+    match = re.search(json_pattern, text, re.DOTALL)
+    if match:
+        return match.group(1).strip()
+    
+    # 尝试找到第一个 { 到最后一个 } 之间的内容
+    start_idx = text.find('{')
+    if start_idx != -1:
+        # 从后往前找最后一个 }
+        end_idx = text.rfind('}')
+        if end_idx != -1 and end_idx > start_idx:
+            json_candidate = text[start_idx:end_idx+1]
+            try:
+                json.loads(json_candidate)
+                return json_candidate
+            except json.JSONDecodeError:
+                pass
+    
+    return None
+
+
 def parse_json_object_response(json_string: str) -> Optional[UserAnalysisResponse]:
     """
     解析并验证JSON Object模式的响应
@@ -185,6 +247,9 @@ def parse_json_object_response(json_string: str) -> Optional[UserAnalysisRespons
     Returns:
         解析后的Pydantic对象，如果解析或验证失败返回None
     """
+    if not json_string:
+        return None
+    
     try:
         # 解析JSON字符串
         json_data = json.loads(json_string)
@@ -258,7 +323,23 @@ def generate_user_data(args, inters, item2feature, reviews, api_info, mode='trai
         
         # 根据响应格式类型和是否使用vLLM调用不同的API
         # 注意：vLLM不支持标准的json_object模式，两种模式都使用guided_json
-        if args.response_format == 'json_object' and not use_vllm:
+        if args.response_format == 'prompt_only':
+            # prompt_only模式：不依赖API的结构化输出，仅通过prompt引导，然后代码解析
+            res = get_res_batch(args.model_name, prompt_list[st:st+args.batchsize], api_info, 
+                              response_format=None, use_json_object=False, use_prompt_only=True)
+            
+            # 解析JSON字符串并验证
+            parsed_responses = []
+            for json_str in res:
+                if json_str is None:
+                    parsed_responses.append(None)
+                else:
+                    # 尝试从文本中提取JSON（可能包含markdown代码块或其他文本）
+                    json_str = extract_json_from_text(json_str)
+                    parsed_response = parse_json_object_response(json_str) if json_str else None
+                    parsed_responses.append(parsed_response)
+            res = parsed_responses
+        elif args.response_format == 'json_object' and not use_vllm:
             # 使用json_object模式（仅适用于OpenAI兼容API），需要手动解析和验证
             res = get_res_batch(args.model_name, prompt_list[st:st+args.batchsize], api_info, 
                               response_format=None, use_json_object=True)
@@ -309,8 +390,9 @@ def parse_args():
     parser.add_argument('--batchsize', type=int, default=16)
     parser.add_argument('--max_his_len', type=int, default=20)
     parser.add_argument('--generate_batch_file', action='store_true', help='生成批量提交文件而不是直接调用API')
-    parser.add_argument('--response_format', type=str, default='json_schema', choices=['json_schema', 'json_object'],
-                       help='响应格式类型: json_schema (使用严格的JSON Schema) 或 json_object (使用JSON Object模式)')
+    parser.add_argument('--response_format', type=str, default='json_schema', 
+                       choices=['json_schema', 'json_object', 'prompt_only'],
+                       help='响应格式类型: json_schema (使用严格的JSON Schema), json_object (使用JSON Object模式), 或 prompt_only (仅通过prompt引导，代码解析)')
     return parser.parse_args()
 
 

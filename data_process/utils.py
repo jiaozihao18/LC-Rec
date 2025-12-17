@@ -29,7 +29,7 @@ def _is_vllm_service(base_url):
     return any(indicator in base_url_lower for indicator in vllm_indicators)
 
 
-def get_res_batch(model_name, prompt_list, api_info, response_format=None, system_message=None, use_json_object=False, guided_decoding_backend="outlines"):
+def get_res_batch(model_name, prompt_list, api_info, response_format=None, system_message=None, use_json_object=False, use_prompt_only=False, guided_decoding_backend="outlines"):
     """
     批量调用大模型API，支持JSON Schema和JSON Object结构化输出
     支持OpenAI兼容API和vLLM本地部署的结构化输出
@@ -46,6 +46,7 @@ def get_res_batch(model_name, prompt_list, api_info, response_format=None, syste
         response_format: (可选) Pydantic模型类，用于JSON Schema结构化输出。如果提供，将使用parse方法或guided_json
         system_message: (可选) 系统消息，如果为None，使用默认消息
         use_json_object: (可选) 是否使用JSON Object模式，如果为True，将返回JSON字符串
+        use_prompt_only: (可选) 是否仅通过prompt引导输出JSON（不依赖API结构化输出），如果为True，将返回普通文本（可能包含JSON）
         guided_decoding_backend: (可选) vLLM引导解码后端，可选值: "outlines", "lm-format-enforcer", "xgrammar"，默认为"outlines"
     
     Returns:
@@ -158,7 +159,8 @@ def get_res_batch(model_name, prompt_list, api_info, response_format=None, syste
                 output = completion.choices[0].message.content.strip()
                 output_list.append(output)
             else:
-                # 普通文本输出
+                # 普通文本输出（包括prompt_only模式：不设置任何结构化输出参数，仅通过prompt引导）
+                # 返回原始文本，由调用方负责解析（如果需要）
                 completion = client.chat.completions.create(
                     model=model_name,
                     messages=messages,
