@@ -119,6 +119,11 @@ def generate_batch_submission_file(args, inters, item2feature, reviews, api_info
     json_schema = UserAnalysisResponse.model_json_schema()
     guided_decoding_backend = api_info.get("guided_decoding_backend", "outlines") if api_info else "outlines"
     
+    # 准备extra_body基础参数（用于thinking控制）
+    extra_body_base = {}
+    if args.enable_thinking is False:
+        extra_body_base["chat_template_kwargs"] = {"enable_thinking": False}
+    
     # 生成JSONL文件
     output_file = os.path.join(args.root, f'{args.dataset}_{mode}_batch_submission.jsonl')
     with open(output_file, 'w', encoding='utf-8') as f:
@@ -129,16 +134,18 @@ def generate_batch_submission_file(args, inters, item2feature, reviews, api_info
                 # vLLM使用extra_body传递guided_json实现结构化输出
                 # vLLM不支持标准的response_format={"type": "json_object"}
                 # 对于json_object模式，也使用guided_json（使用完整的JSON Schema）
+                extra_body = {
+                    "guided_json": json_schema,
+                    "guided_decoding_backend": guided_decoding_backend,
+                    **extra_body_base
+                }
                 request_body = {
                     "model": args.model_name,
                     "messages": [
                         {"role": "system", "content": system_message},
                         {"role": "user", "content": prompt}
                     ],
-                    "extra_body": {
-                        "guided_json": json_schema,
-                        "guided_decoding_backend": guided_decoding_backend
-                    }
+                    "extra_body": extra_body
                 }
             else:
                 # OpenAI兼容API使用response_format
@@ -151,6 +158,8 @@ def generate_batch_submission_file(args, inters, item2feature, reviews, api_info
                             {"role": "user", "content": prompt}
                         ]
                     }
+                    if extra_body_base:
+                        request_body["extra_body"] = extra_body_base
                 elif args.response_format == 'json_object':
                     response_format_config = {"type": "json_object"}
                     request_body = {
@@ -161,6 +170,8 @@ def generate_batch_submission_file(args, inters, item2feature, reviews, api_info
                         ],
                         "response_format": response_format_config
                     }
+                    if extra_body_base:
+                        request_body["extra_body"] = extra_body_base
                 else:  # json_schema
                     response_format_config = {
                         "type": "json_schema",
@@ -178,6 +189,8 @@ def generate_batch_submission_file(args, inters, item2feature, reviews, api_info
                         ],
                         "response_format": response_format_config
                     }
+                    if extra_body_base:
+                        request_body["extra_body"] = extra_body_base
             
             request_obj = {
                 "custom_id": custom_id,
@@ -326,7 +339,8 @@ def generate_user_data(args, inters, item2feature, reviews, api_info, mode='trai
         if args.response_format == 'prompt_only':
             # prompt_only模式：不依赖API的结构化输出，仅通过prompt引导，然后代码解析
             res = get_res_batch(args.model_name, prompt_list[st:st+args.batchsize], api_info, 
-                              response_format=None, use_json_object=False, use_prompt_only=True)
+                              response_format=None, use_json_object=False, use_prompt_only=True,
+                              enable_thinking=args.enable_thinking)
             
             # 解析JSON字符串并验证
             parsed_responses = []
@@ -342,7 +356,8 @@ def generate_user_data(args, inters, item2feature, reviews, api_info, mode='trai
         elif args.response_format == 'json_object' and not use_vllm:
             # 使用json_object模式（仅适用于OpenAI兼容API），需要手动解析和验证
             res = get_res_batch(args.model_name, prompt_list[st:st+args.batchsize], api_info, 
-                              response_format=None, use_json_object=True)
+                              response_format=None, use_json_object=True,
+                              enable_thinking=args.enable_thinking)
             
             # 解析JSON字符串并验证
             parsed_responses = []
@@ -357,7 +372,8 @@ def generate_user_data(args, inters, item2feature, reviews, api_info, mode='trai
             # 使用json_schema模式（默认），或者vLLM使用json_object模式时也使用完整的schema
             # 对于vLLM，json_object和json_schema都使用guided_json + 完整schema
             res = get_res_batch(args.model_name, prompt_list[st:st+args.batchsize], api_info, 
-                              response_format=UserAnalysisResponse)
+                              response_format=UserAnalysisResponse,
+                              enable_thinking=args.enable_thinking)
         
         for i, parsed_response in enumerate(res):
             user, target_item, history = user_data_list[st + i]
@@ -393,6 +409,19 @@ def parse_args():
     parser.add_argument('--response_format', type=str, default='json_schema', 
                        choices=['json_schema', 'json_object', 'prompt_only'],
                        help='响应格式类型: json_schema (使用严格的JSON Schema), json_object (使用JSON Object模式), 或 prompt_only (仅通过prompt引导，代码解析)')
+    def str_to_bool_or_none(v):
+        if v is None:
+            return None
+        v_lower = str(v).lower()
+        if v_lower in ('true', '1', 'yes'):
+            return True
+        elif v_lower in ('false', '0', 'no'):
+            return False
+        else:
+            return None
+    
+    parser.add_argument('--enable_thinking', type=str_to_bool_or_none, default=None,
+                       help='是否启用thinking功能（Qwen3系列默认开启）。设置为False可禁用thinking功能。可选值: true/1/yes, false/0/no, 或不设置（None，使用默认行为）')
     return parser.parse_args()
 
 

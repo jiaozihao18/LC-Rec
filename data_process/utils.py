@@ -29,7 +29,7 @@ def _is_vllm_service(base_url):
     return any(indicator in base_url_lower for indicator in vllm_indicators)
 
 
-def get_res_batch(model_name, prompt_list, api_info, response_format=None, system_message=None, use_json_object=False, use_prompt_only=False, guided_decoding_backend="outlines"):
+def get_res_batch(model_name, prompt_list, api_info, response_format=None, system_message=None, use_json_object=False, use_prompt_only=False, guided_decoding_backend="outlines", enable_thinking=None):
     """
     批量调用大模型API，支持JSON Schema和JSON Object结构化输出
     支持OpenAI兼容API和vLLM本地部署的结构化输出
@@ -48,6 +48,7 @@ def get_res_batch(model_name, prompt_list, api_info, response_format=None, syste
         use_json_object: (可选) 是否使用JSON Object模式，如果为True，将返回JSON字符串
         use_prompt_only: (可选) 是否仅通过prompt引导输出JSON（不依赖API结构化输出），如果为True，将返回普通文本（可能包含JSON）
         guided_decoding_backend: (可选) vLLM引导解码后端，可选值: "outlines", "lm-format-enforcer", "xgrammar"，默认为"outlines"
+        enable_thinking: (可选) 是否启用thinking功能（Qwen3系列默认开启）。如果为False，将在chat_template_kwargs中传递enable_thinking=False来禁用
     
     Returns:
         output_list: 输出列表。如果使用response_format（JSON Schema），返回解析后的Pydantic对象列表；
@@ -85,6 +86,11 @@ def get_res_batch(model_name, prompt_list, api_info, response_format=None, syste
         for prompt in prompt_list
     ]
     
+    # 准备extra_body参数（用于thinking控制）
+    extra_body_base = {}
+    if enable_thinking is False:
+        extra_body_base["chat_template_kwargs"] = {"enable_thinking": False}
+    
     # 调用API
     output_list = []
     for messages in messages_list:
@@ -95,6 +101,12 @@ def get_res_batch(model_name, prompt_list, api_info, response_format=None, syste
                     # vLLM使用guided_json通过extra_body传递
                     json_schema = response_format.model_json_schema()
                     
+                    # 合并extra_body参数
+                    extra_body = {
+                        "guided_decoding_backend": guided_decoding_backend,
+                        **extra_body_base
+                    }
+                    
                     # 方法1: 使用beta.parse方法（推荐，自动解析）
                     try:
                         completion = client.beta.chat.completions.parse(
@@ -102,7 +114,7 @@ def get_res_batch(model_name, prompt_list, api_info, response_format=None, syste
                             messages=messages,
                             temperature=0.4,
                             response_format=response_format,
-                            extra_body={"guided_decoding_backend": guided_decoding_backend}
+                            extra_body=extra_body
                         )
                         # 获取解析后的Pydantic对象
                         parsed = completion.choices[0].message.parsed
@@ -110,14 +122,15 @@ def get_res_batch(model_name, prompt_list, api_info, response_format=None, syste
                     except Exception as parse_error:
                         # 如果beta.parse方法失败，回退到使用create方法配合guided_json
                         print(f"Warning: beta.parse failed, using guided_json fallback: {parse_error}")
+                        extra_body_with_guided = {
+                            "guided_json": json_schema,
+                            **extra_body
+                        }
                         completion = client.chat.completions.create(
                             model=model_name,
                             messages=messages,
                             temperature=0.4,
-                            extra_body={
-                                "guided_json": json_schema,
-                                "guided_decoding_backend": guided_decoding_backend
-                            }
+                            extra_body=extra_body_with_guided
                         )
                         # 手动解析JSON字符串
                         json_str = completion.choices[0].message.content.strip()
@@ -130,11 +143,13 @@ def get_res_batch(model_name, prompt_list, api_info, response_format=None, syste
                             output_list.append(None)
                 else:
                     # OpenAI兼容API使用parse方法
+                    extra_body = extra_body_base if extra_body_base else None
                     completion = client.chat.completions.parse(
                         model=model_name,
                         messages=messages,
                         temperature=0.4,
-                        response_format=response_format
+                        response_format=response_format,
+                        extra_body=extra_body if extra_body else None
                     )
                     # 获取解析后的Pydantic对象
                     parsed = completion.choices[0].message.parsed
@@ -150,22 +165,26 @@ def get_res_batch(model_name, prompt_list, api_info, response_format=None, syste
                                    "Please use response_format parameter with Pydantic model instead.")
                 
                 # OpenAI兼容API使用标准的json_object模式
+                extra_body = extra_body_base if extra_body_base else None
                 completion = client.chat.completions.create(
                     model=model_name,
                     messages=messages,
                     temperature=0.4,
-                    response_format={"type": "json_object"}
+                    response_format={"type": "json_object"},
+                    extra_body=extra_body if extra_body else None
                 )
                 output = completion.choices[0].message.content.strip()
                 output_list.append(output)
             else:
                 # 普通文本输出（包括prompt_only模式：不设置任何结构化输出参数，仅通过prompt引导）
                 # 返回原始文本，由调用方负责解析（如果需要）
+                extra_body = extra_body_base if extra_body_base else None
                 completion = client.chat.completions.create(
                     model=model_name,
                     messages=messages,
                     temperature=0.4,
-                    max_tokens=1024
+                    max_tokens=1024,
+                    extra_body=extra_body if extra_body else None
                 )
                 output = completion.choices[0].message.content.strip()
                 output_list.append(output)
