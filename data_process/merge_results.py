@@ -6,7 +6,6 @@
 import argparse
 import os
 import json
-import re
 import glob
 from typing import Optional
 from utils import write_json_file
@@ -20,51 +19,6 @@ DEFAULT_PREFERENCES = {
     "user_related_intention": "I enjoy high-quality items.",
     "item_related_intention": "High-quality item with good features."
 }
-
-
-def extract_json_from_text(text: str) -> Optional[str]:
-    """
-    从文本中提取JSON字符串（可能包含markdown代码块或其他文本）
-    
-    Args:
-        text: 可能包含JSON的文本
-    
-    Returns:
-        提取的JSON字符串，如果提取失败返回None
-    """
-    if not text:
-        return None
-    
-    # 尝试直接解析（如果整个文本就是JSON）
-    text = text.strip()
-    if text.startswith('{') and text.endswith('}'):
-        try:
-            json.loads(text)
-            return text
-        except json.JSONDecodeError:
-            pass
-    
-    # 尝试从markdown代码块中提取
-    # 匹配 ```json ... ``` 或 ``` ... ```
-    json_pattern = r'```(?:json)?\s*(\{.*?\})\s*```'
-    match = re.search(json_pattern, text, re.DOTALL)
-    if match:
-        return match.group(1).strip()
-    
-    # 尝试找到第一个 { 到最后一个 } 之间的内容
-    start_idx = text.find('{')
-    if start_idx != -1:
-        # 从后往前找最后一个 }
-        end_idx = text.rfind('}')
-        if end_idx != -1 and end_idx > start_idx:
-            json_candidate = text[start_idx:end_idx+1]
-            try:
-                json.loads(json_candidate)
-                return json_candidate
-            except json.JSONDecodeError:
-                pass
-    
-    return None
 
 
 def load_results_files(input_dir: str, pattern: str = "prompt_part*_results.jsonl"):
@@ -117,10 +71,10 @@ def load_results_files(input_dir: str, pattern: str = "prompt_part*_results.json
 
 def parse_output(output: Optional[str], extracted_json: Optional[dict] = None):
     """
-    解析输出，提取所需的字段
+    解析输出，提取所需的字段（假定JSON是完整的）
     
     Args:
-        output: 原始输出文本
+        output: 原始输出文本（完整的JSON字符串）
         extracted_json: 已提取的JSON（如果存在）
     
     Returns:
@@ -128,36 +82,26 @@ def parse_output(output: Optional[str], extracted_json: Optional[dict] = None):
     """
     # 如果已经有 extracted_json，直接使用
     if extracted_json:
-        return {
-            "general_preference": extracted_json.get("general_preference", DEFAULT_PREFERENCES["general_preference"]),
-            "long_term_preference": extracted_json.get("long_term_preference", DEFAULT_PREFERENCES["long_term_preference"]),
-            "short_term_preference": extracted_json.get("short_term_preference", DEFAULT_PREFERENCES["short_term_preference"]),
-            "user_related_intention": extracted_json.get("user_related_intention", DEFAULT_PREFERENCES["user_related_intention"]),
-            "item_related_intention": extracted_json.get("item_related_intention", DEFAULT_PREFERENCES["item_related_intention"])
-        }
-    
-    # 如果没有 extracted_json，尝试从 output 中提取
-    if not output:
+        json_data = extracted_json
+    elif output:
+        # 直接解析 output 作为 JSON
+        try:
+            json_data = json.loads(output)
+        except json.JSONDecodeError as e:
+            print(f"警告: 无法解析JSON，使用默认值: {e}")
+            return DEFAULT_PREFERENCES.copy()
+    else:
+        # 如果都没有，返回默认值
         return DEFAULT_PREFERENCES.copy()
     
-    # 尝试提取 JSON
-    json_str = extract_json_from_text(output)
-    if json_str:
-        try:
-            json_data = json.loads(json_str)
-            return {
-                "general_preference": json_data.get("general_preference", DEFAULT_PREFERENCES["general_preference"]),
-                "long_term_preference": json_data.get("long_term_preference", DEFAULT_PREFERENCES["long_term_preference"]),
-                "short_term_preference": json_data.get("short_term_preference", DEFAULT_PREFERENCES["short_term_preference"]),
-                "user_related_intention": json_data.get("user_related_intention", DEFAULT_PREFERENCES["user_related_intention"]),
-                "item_related_intention": json_data.get("item_related_intention", DEFAULT_PREFERENCES["item_related_intention"])
-            }
-        except json.JSONDecodeError:
-            pass
-    
-    # 如果无法解析，返回默认值
-    print(f"警告: 无法从输出中提取JSON，使用默认值")
-    return DEFAULT_PREFERENCES.copy()
+    # 提取所需字段
+    return {
+        "general_preference": json_data.get("general_preference", DEFAULT_PREFERENCES["general_preference"]),
+        "long_term_preference": json_data.get("long_term_preference", DEFAULT_PREFERENCES["long_term_preference"]),
+        "short_term_preference": json_data.get("short_term_preference", DEFAULT_PREFERENCES["short_term_preference"]),
+        "user_related_intention": json_data.get("user_related_intention", DEFAULT_PREFERENCES["user_related_intention"]),
+        "item_related_intention": json_data.get("item_related_intention", DEFAULT_PREFERENCES["item_related_intention"])
+    }
 
 
 def merge_results_to_user_json(results: list):
