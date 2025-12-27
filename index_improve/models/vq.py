@@ -92,17 +92,26 @@ class VectorQuantizer(nn.Module):
                 
                 # 从当前 batch 的 latent 中随机采样来替换未使用的码本向量
                 if len(latent) > 0:
-                    # 随机选择一些 latent 向量
-                    sample_indices = torch.randint(0, len(latent), (num_unused,), device=latent.device)
-                    sample_vectors = latent[sample_indices]
-                    
-                    # 添加一些噪声以避免完全重复
-                    noise = torch.randn_like(sample_vectors) * 0.01
-                    self.embedding.weight.data[unused_indices] = (sample_vectors + noise).detach()
-                    
-                    # 重置这些向量的 EMA 统计
-                    self._ema_cluster_size[unused_indices] = 0
-                    self._ema_w[unused_indices] = 0
+                    # 确保采样数量不超过 latent 的数量
+                    num_samples = min(num_unused, len(latent))
+                    if num_samples > 0:
+                        # 随机选择一些 latent 向量
+                        sample_indices = torch.randint(0, len(latent), (num_samples,), device=latent.device)
+                        sample_vectors = latent[sample_indices]
+                        
+                        # 如果未使用的码本向量数量大于采样数量，随机选择要重置的码本向量
+                        if num_unused > num_samples:
+                            selected_unused_indices = unused_indices[torch.randperm(len(unused_indices), device=latent.device)[:num_samples]]
+                        else:
+                            selected_unused_indices = unused_indices
+                        
+                        # 添加一些噪声以避免完全重复
+                        noise = torch.randn_like(sample_vectors) * 0.01
+                        self.embedding.weight.data[selected_unused_indices] = (sample_vectors + noise).detach()
+                        
+                        # 重置这些向量的 EMA 统计
+                        self._ema_cluster_size[selected_unused_indices] = 0
+                        self._ema_w[selected_unused_indices] = 0
 
     def forward(self, x, use_sk=True, use_ema=True):
         # Flatten input
@@ -136,27 +145,33 @@ class VectorQuantizer(nn.Module):
 
         # EMA 更新码本（仅在训练时）
         if self.training and use_ema:
-            # 统计每个码本向量的使用次数
-            encodings = F.one_hot(indices, self.n_e).float()  # [N, n_e]
-            cluster_size = encodings.sum(0)  # [n_e]
-            
-            # 更新 EMA 统计
-            self._ema_cluster_size.mul_(self.ema_decay).add_(
-                cluster_size, alpha=1 - self.ema_decay
-            )
-            
-            # 计算每个码本向量对应的 latent 向量的加权和
-            n = latent.size(0)
-            dw = torch.matmul(encodings.t(), latent)  # [n_e, e_dim]
-            self._ema_w.mul_(self.ema_decay).add_(dw, alpha=1 - self.ema_decay)
-            
-            # 更新码本向量（使用 EMA）
-            # 计算归一化的 EMA 加权和
-            normalized_ema_w = self._ema_w / (self._ema_cluster_size.unsqueeze(1) + self.epsilon)
-            
-            # 使用 EMA 更新 embedding
-            # 标准做法：直接使用归一化的 EMA 值更新，但只更新被使用过的码本向量
             with torch.no_grad():
+                # 统计每个码本向量的使用次数（使用更高效的方法避免创建大张量）
+                # 使用 scatter_add_ 代替 one_hot + sum，更节省显存
+                cluster_size = torch.zeros(self.n_e, device=indices.device, dtype=torch.float32)
+                cluster_size.scatter_add_(0, indices.view(-1), torch.ones_like(indices.view(-1), dtype=torch.float32))
+                
+                # 更新 EMA 统计
+                self._ema_cluster_size.mul_(self.ema_decay).add_(
+                    cluster_size, alpha=1 - self.ema_decay
+                )
+                
+                # 计算每个码本向量对应的 latent 向量的加权和
+                # 使用 index_add_ 代替 one_hot + matmul，更节省显存
+                indices_flat = indices.view(-1)  # [N]
+                latent_flat = latent.view(-1, self.e_dim)  # [N, e_dim]
+                dw = torch.zeros(self.n_e, self.e_dim, device=latent.device, dtype=latent.dtype)
+                # 使用 index_add_ 对每个码本向量累加对应的 latent 向量
+                # 分别处理每个维度（虽然需要循环，但避免了创建大张量）
+                for dim in range(self.e_dim):
+                    dw[:, dim].index_add_(0, indices_flat, latent_flat[:, dim])
+                
+                self._ema_w.mul_(self.ema_decay).add_(dw, alpha=1 - self.ema_decay)
+                
+                # 更新码本向量（使用 EMA）
+                # 计算归一化的 EMA 加权和
+                normalized_ema_w = self._ema_w / (self._ema_cluster_size.unsqueeze(1) + self.epsilon)
+                
                 # 只更新使用频率大于阈值的码本向量
                 used_mask = self._ema_cluster_size > self.epsilon
                 if used_mask.any():
@@ -167,11 +182,15 @@ class VectorQuantizer(nn.Module):
                         self.embedding.weight.data[used_mask] * (1 - update_rate) +
                         normalized_ema_w[used_mask] * update_rate
                     )
-            
+                
+                # 清理中间变量
+                del cluster_size, dw, normalized_ema_w, used_mask, indices_flat, latent_flat
+                
             # 定期重置未使用的码本向量
             self.step_count += 1
             if self.step_count % self.reset_interval == 0:
-                self._reset_unused_codes(latent)
+                with torch.no_grad():
+                    self._reset_unused_codes(latent)
         else:
             # 不使用 EMA 时，使用标准的梯度更新
             pass
@@ -186,13 +205,14 @@ class VectorQuantizer(nn.Module):
     def get_codebook_usage(self):
         """获取码本利用率统计"""
         with torch.no_grad():
-            usage = self._ema_cluster_size / (self._ema_cluster_size.sum() + self.epsilon)
+            total = self._ema_cluster_size.sum() + self.epsilon
+            usage = self._ema_cluster_size / total
             used_codes = (usage > self.reset_threshold).sum().item()
             utilization = used_codes / self.n_e
+            # 不返回 usage_distribution 以节省内存，只在需要时计算
             return {
                 'utilization': utilization,
                 'used_codes': used_codes,
                 'total_codes': self.n_e,
-                'usage_distribution': usage.cpu().numpy()
             }
 

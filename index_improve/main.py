@@ -36,7 +36,7 @@ def parse_args():
     parser.add_argument('--sk_epsilons', type=float, nargs='+', default=None, help="sinkhorn epsilons")
     parser.add_argument("--sk_iters", type=int, default=50, help="max sinkhorn iters")
 
-    parser.add_argument("--device", type=str, default="cuda:0", help="gpu or cpu")
+    parser.add_argument("--device", type=str, default="npu:0", help="npu, cpu or cuda")
 
     parser.add_argument('--num_emb_list', type=int, nargs='+', default=[256,256,256], help='emb num of every vq')
     parser.add_argument('--e_dim', type=int, default=32, help='vq codebook embedding size')
@@ -62,7 +62,8 @@ if __name__ == '__main__':
     random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
-    torch.cuda.manual_seed_all(seed)
+    if torch.npu.is_available():
+        torch.npu.manual_seed_all(seed)
     torch.backends.cudnn.deterministic = True
     torch.backends.cudnn.benchmark = False
 

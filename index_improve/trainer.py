@@ -125,6 +125,11 @@ class Trainer(object):
             self.scheduler.step()
             total_loss += loss.item()
             total_recon_loss += loss_recon.item()
+            
+            # 清理中间变量和显存缓存
+            del out, rq_loss, indices, loss, loss_recon
+            if batch_idx % 100 == 0 and torch.npu.is_available():  # 每100个batch清理一次缓存（仅NPU）
+                torch.npu.empty_cache()
 
         return total_loss, total_recon_loss
 
